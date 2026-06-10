@@ -168,33 +168,27 @@ def _single_arg_op_layout(
             stick_dim_size = in_layout.size[-1]
             unaligned = stick_dim_size % in_elems_per_stick
 
+            fmt = (
+                ElementArrangement.DL16_TO_FP32
+                if in_layout.dtype == torch.float16 and output.dtype == torch.float32
+                else ElementArrangement.STANDARD
+            )
+
             if unaligned > 0:
                 outer_sizes = [concretize_expr(s) for s in output.size[:-1]]
                 outer_strides = [concretize_expr(s) for s in output.stride[:-1]]
                 c_size = outer_sizes + [in_elems_per_stick]
                 c_stride = outer_strides + [1]
+            else:
+                c_size = [concretize_expr(s) for s in output.size]
+                c_stride = [concretize_expr(s) for s in output.stride]
 
-                fmt = (
-                    ElementArrangement.DL16_TO_FP32
-                    if in_layout.dtype == torch.float16
-                    and output.dtype == torch.float32
-                    else ElementArrangement.STANDARD
-                )
-                return SpyreTensorLayout(
-                    c_size,
-                    c_stride,
-                    output.dtype,
-                    list(range(len(c_size))),
-                    fmt,
-                )
-
-            c_size = [concretize_expr(s) for s in output.size]
-            c_stride = [concretize_expr(s) for s in output.stride]
             return SpyreTensorLayout(
                 c_size,
                 c_stride,
                 output.dtype,
                 list(range(len(c_size))),
+                fmt,
             )
 
         case _:
