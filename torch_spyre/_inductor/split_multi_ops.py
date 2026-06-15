@@ -570,7 +570,14 @@ def validate_ops(graph: GraphLowering) -> None:
 
         # Check all layouts have the same element_arrangement
         stl_eas = [layout.element_arrangement for layout in layouts]
-        if len(set(stl_eas)) != 1:
+        unique_eas = set(stl_eas)
+        
+        # Allow mixed EA if it's DL16_TO_FP32 with STANDARD (for broadcast operations)
+        # This is handled by the Phase 3 fix in propagate_layouts.py
+        from torch_spyre._C import ElementArrangement
+        allowed_mixed_eas = {ElementArrangement.DL16_TO_FP32, ElementArrangement.STANDARD}
+        
+        if len(unique_eas) != 1 and unique_eas != allowed_mixed_eas:
             args_str = ", ".join(
                 [f'"{name}": {ea}' for name, ea in zip(input_names, stl_eas)]
             )
