@@ -125,6 +125,20 @@ def _single_arg_op_layout(
     Called once per candidate input STL to produce the corresponding output STL.
     """
     data = op.data
+    
+    # Debug: Print input and output information at the start
+    in_host_coords = host_coordinates(in_layout, dep)
+    out_host_coords = host_coordinates(output, output_dep)
+    in_dev_coords = device_coordinates(stl, dep)
+    
+    print(f"\n[DEBUG] _single_arg_op_layout called for op: {op.get_name()}")
+    print(f"  Input:")
+    print(f"    Host coords: {in_host_coords}")
+    print(f"    Device coords: {in_dev_coords}")
+    print(f"    Device size: {list(stl.device_size)}")
+    print(f"    Stride map: {list(stl.stride_map)}")
+    print(f"    EA: {stl.element_arrangement}")
+    print(f"    dtype: {in_layout.dtype}")
 
     if isinstance(data, Reduction):
         # Propagate input stick to output if the dim survives, else put stick last.
@@ -133,7 +147,9 @@ def _single_arg_op_layout(
         x_stick_expr = x_dev_coords[-1]
         out_stick_dim = matching_dim(out_coords, x_stick_expr)
         if out_stick_dim is None:
-            out_dim_order = list(range(len(output.size))) + [-1]
+            # Stick dimension was reduced - use only existing output dimensions
+            # Don't append -1 as it creates an extra dimension in device_size
+            out_dim_order = list(range(len(output.size)))
         else:
             out_dim_order = [d for d in range(len(output.size)) if d != out_stick_dim]
             out_dim_order = out_dim_order + [out_stick_dim]
@@ -154,7 +170,9 @@ def _single_arg_op_layout(
             print(f"[EA_DEBUG] Reduction preserves EA: input_ea={stl.element_arrangement} -> output_ea={output_ea}")
             logger.info(f"[EA_DEBUG] Reduction preserves EA: input_ea={stl.element_arrangement} -> output_ea={output_ea}")
         
-        return SpyreTensorLayout(c_size, c_stride, output.dtype, out_dim_order, output_ea)
+        result_stl = SpyreTensorLayout(c_size, c_stride, output.dtype, out_dim_order, output_ea)
+        print(f"  Output STL: device_size={list(result_stl.device_size)}, stride_map={list(result_stl.stride_map)}, EA={result_stl.element_arrangement}")
+        return result_stl
 
     # Single-arg pointwise
     assert isinstance(data, Pointwise)
@@ -167,12 +185,14 @@ def _single_arg_op_layout(
             # Concretize for C++ SpyreTensorLayout constructor.
             c_size = [concretize_expr(s) for s in output.size]
             c_stride = [concretize_expr(s) for s in output.stride]
-            return SpyreTensorLayout(
+            result_stl = SpyreTensorLayout(
                 c_size,
                 c_stride,
                 output.dtype,
                 list(range(len(output.size))),
             )
+            print(f"  Output STL: device_size={list(result_stl.device_size)}, stride_map={list(result_stl.stride_map)}, EA={result_stl.element_arrangement}")
+            return result_stl
 
         case prims.convert_element_type.default:
             # Type conversion may require padding when input has padding due to stick
@@ -225,13 +245,15 @@ def _single_arg_op_layout(
                 c_size = [concretize_expr(s) for s in output.size]
                 c_stride = [concretize_expr(s) for s in output.stride]
 
-            return SpyreTensorLayout(
+            result_stl = SpyreTensorLayout(
                 c_size,
                 c_stride,
                 output.dtype,
                 list(range(len(c_size))),
                 fmt,
             )
+            print(f"  Output STL: device_size={list(result_stl.device_size)}, stride_map={list(result_stl.stride_map)}, EA={result_stl.element_arrangement}")
+            return result_stl
 
         case _:
             in_coords = host_coordinates(in_layout, dep)
@@ -243,17 +265,21 @@ def _single_arg_op_layout(
                 and same_device_size(in_layout.dtype, output.dtype)
             ):
                 # Input and output tensors are being accessed identically and elem size is the same.
-                # Preserve the input's ElementArrangement since the memory layout structure is unchanged.
+                # Preserve the entire input layout (device_size, stride_map, and ElementArrangement)
+                # since the memory layout structure is unchanged. This is critical for copy operations
+                # where we need to maintain the exact same layout to avoid scheduler failures.
                 print(f"[EA_DEBUG] single_arg_op (propagate layout): input_ea={stl.element_arrangement}, output dtype={output.dtype}")
-                print(f"[EA_DEBUG]   Preserving EA={stl.element_arrangement}")
+                print(f"[EA_DEBUG]   Preserving entire layout (device_size={list(stl.device_size)}, stride_map={list(stl.stride_map)}, EA={stl.element_arrangement})")
                 logger.info(f"[EA_DEBUG] single_arg_op (propagate layout): input_ea={stl.element_arrangement}, output dtype={output.dtype}")
-                logger.info(f"[EA_DEBUG]   Preserving EA={stl.element_arrangement}")
-                return SpyreTensorLayout(
+                logger.info(f"[EA_DEBUG]   Preserving entire layout (device_size={list(stl.device_size)}, stride_map={list(stl.stride_map)}, EA={stl.element_arrangement})")
+                result_stl = SpyreTensorLayout(
                     stl.device_size,
                     stl.stride_map,
                     get_device_dtype(output.dtype),
                     stl.element_arrangement,  # Preserve input's ElementArrangement
                 )
+                print(f"  Output STL: device_size={list(result_stl.device_size)}, stride_map={list(result_stl.stride_map)}, EA={result_stl.element_arrangement}")
+                return result_stl
             else:
                 # TODO: We should be able to preserve the input stride_map
                 #       unless the operation is changing elems_per_stick.
@@ -283,7 +309,9 @@ def _single_arg_op_layout(
                 output_ea = stl.element_arrangement if same_device_size(in_layout.dtype, output.dtype) else ElementArrangement.STANDARD
                 print(f"[EA_DEBUG] single_arg_op (fallback): input_ea={stl.element_arrangement}, same_size={same_device_size(in_layout.dtype, output.dtype)}, output_ea={output_ea}")
                 logger.info(f"[EA_DEBUG] single_arg_op (fallback): input_ea={stl.element_arrangement}, same_size={same_device_size(in_layout.dtype, output.dtype)}, output_ea={output_ea}")
-                return SpyreTensorLayout(c_size, c_stride, output.dtype, dim_order, output_ea)
+                result_stl = SpyreTensorLayout(c_size, c_stride, output.dtype, dim_order, output_ea)
+                print(f"  Output STL: device_size={list(result_stl.device_size)}, stride_map={list(result_stl.stride_map)}, EA={result_stl.element_arrangement}")
+                return result_stl
 
 
 def _exx2_layout(
@@ -550,7 +578,15 @@ def _multi_arg_pointwise_layouts(
             # Determine output EA for mixed-EA inputs
             # Collect unique EAs from all inputs
             input_eas = {next(iter(arg.layouts)).element_arrangement for arg in args}
-            
+            # Debug: print device coordinates for each input
+            for i, arg in enumerate(args):
+                stl = next(iter(arg.layouts))
+                dev_coords = device_coordinates(stl, arg.dep)
+                host_coords = host_coordinates(arg.layout, arg.dep)
+                print(f"[EA_DEBUG] Input {i}: shape={arg.layout.size}, EA={stl.element_arrangement}")
+                print(f"  Host coords: {host_coords}")
+                print(f"  Device coords: {dev_coords}")
+                print(f"  Device size: {list(stl.device_size)}, stride_map: {list(stl.stride_map)}")   
             if len(input_eas) == 1:
                 # All inputs have same EA, preserve it
                 output_ea = next(iter(input_eas))

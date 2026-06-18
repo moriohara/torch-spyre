@@ -32,6 +32,7 @@ STANDARD EA, since EA doesn't propagate from torch-spyre back to PyTorch.
 
 import torch
 import torch._dynamo as dynamo
+from torch_spyre._C import get_spyre_tensor_layout
 
 # Reset dynamo
 dynamo.reset()
@@ -54,20 +55,38 @@ def test_multiarg_pointwise_with_broadcast():
         x_fp32 = x.to(torch.float32)  # EA: STANDARD → DL16_TO_FP32
         result = x_fp32 * y  # EA: DL16_TO_FP32 * STANDARD(broadcast) → DL16_TO_FP32
         result_fp16 = result.to(torch.float16)  # EA: DL16_TO_FP32 → STANDARD
-        return result_fp16
+        return x_fp32, result, result_fp16
     
     # Create FP16 tensor and FP32 broadcast tensor
     x_fp16 = torch.randn((4, 64), dtype=torch.float16, device=device)
     y_fp32 = torch.randn((4, 1), dtype=torch.float32, device=device)  # Broadcast at stick dim
     
+    print(f"\n[DEBUG] test_multiarg_pointwise_with_broadcast:")
+    print(f"  Input x_fp16: shape={x_fp16.shape}, stride={x_fp16.stride()}, dtype={x_fp16.dtype}")
+    x_fp16_layout = get_spyre_tensor_layout(x_fp16)
+    print(f"    Layout: device_size={list(x_fp16_layout.device_size)}, stride_map={list(x_fp16_layout.stride_map)}, EA={x_fp16_layout.element_arrangement}")
+    print(f"  Input y_fp32: shape={y_fp32.shape}, stride={y_fp32.stride()}, dtype={y_fp32.dtype}")
+    y_fp32_layout = get_spyre_tensor_layout(y_fp32)
+    print(f"    Layout: device_size={list(y_fp32_layout.device_size)}, stride_map={list(y_fp32_layout.stride_map)}, EA={y_fp32_layout.element_arrangement}")
+    
     # Run compiled function on Spyre
-    result_spyre = multiply_with_broadcast(x_fp16, y_fp32)
+    x_fp32_spyre, result_spyre, result_fp16_spyre = multiply_with_broadcast(x_fp16, y_fp32)
+    
+    x_fp32_layout = get_spyre_tensor_layout(x_fp32_spyre)
+    print(f"  After x.to(float32) - x_fp32: shape={x_fp32_spyre.shape}, stride={x_fp32_spyre.stride()}, dtype={x_fp32_spyre.dtype}")
+    print(f"    Layout: device_size={list(x_fp32_layout.device_size)}, stride_map={list(x_fp32_layout.stride_map)}, EA={x_fp32_layout.element_arrangement}")
+    result_layout = get_spyre_tensor_layout(result_spyre)
+    print(f"  After x_fp32 * y - result: shape={result_spyre.shape}, stride={result_spyre.stride()}, dtype={result_spyre.dtype}")
+    print(f"    Layout: device_size={list(result_layout.device_size)}, stride_map={list(result_layout.stride_map)}, EA={result_layout.element_arrangement}")
+    result_fp16_layout = get_spyre_tensor_layout(result_fp16_spyre)
+    print(f"  After result.to(float16) - result_fp16: shape={result_fp16_spyre.shape}, stride={result_fp16_spyre.stride()}, dtype={result_fp16_spyre.dtype}")
+    print(f"    Layout: device_size={list(result_fp16_layout.device_size)}, stride_map={list(result_fp16_layout.stride_map)}, EA={result_fp16_layout.element_arrangement}")
     
     # Compare with CPU for correctness
     x_fp16_cpu = x_fp16.cpu()
     y_fp32_cpu = y_fp32.cpu()
-    result_cpu = multiply_with_broadcast(x_fp16_cpu, y_fp32_cpu)
-    torch.testing.assert_close(result_spyre.cpu(), result_cpu, rtol=1e-3, atol=1e-3)
+    _, _, result_cpu = multiply_with_broadcast(x_fp16_cpu, y_fp32_cpu)
+    torch.testing.assert_close(result_fp16_spyre.cpu(), result_cpu, rtol=1e-3, atol=1e-3)
     
     print(f"✓ Multi-arg pointwise with broadcast output matches CPU ✓")
 
@@ -151,15 +170,35 @@ def test_rmsnorm_step3_rsqrt():
     @torch.compile
     def compute_rsqrt(x, eps=1e-6):
         x_fp32 = x.to(torch.float32)  # STANDARD → DL16_TO_FP32
-        variance = x_fp32.pow(2).mean(-1, keepdim=True)  # DL16_TO_FP32 → STANDARD
+        x_pow2 = x_fp32.pow(2)  # DL16_TO_FP32 → DL16_TO_FP32
+        variance = x_pow2.mean(-1, keepdim=True) #True)  # DL16_TO_FP32 → STANDARD
         rsqrt_var = torch.rsqrt(variance + eps)  # STANDARD → STANDARD
-        return rsqrt_var
+        return x_fp32, x_pow2, variance, rsqrt_var
     
     x_fp16 = torch.randn((4, 64), dtype=torch.float16, device=device)
-    result_spyre = compute_rsqrt(x_fp16)
+    
+    print(f"\n[DEBUG] test_rmsnorm_step3_rsqrt:")
+    print(f"  Input x_fp16: shape={x_fp16.shape}, stride={x_fp16.stride()}, dtype={x_fp16.dtype}")
+    x_fp16_layout = get_spyre_tensor_layout(x_fp16)
+    print(f"    Layout: device_size={list(x_fp16_layout.device_size)}, stride_map={list(x_fp16_layout.stride_map)}, EA={x_fp16_layout.element_arrangement}")
+    
+    x_fp32_spyre, x_pow2_spyre, variance_spyre, result_spyre = compute_rsqrt(x_fp16)
+    
+    x_fp32_layout = get_spyre_tensor_layout(x_fp32_spyre)
+    print(f"  After x.to(float32) - x_fp32: shape={x_fp32_spyre.shape}, stride={x_fp32_spyre.stride()}, dtype={x_fp32_spyre.dtype}")
+    print(f"    Layout: device_size={list(x_fp32_layout.device_size)}, stride_map={list(x_fp32_layout.stride_map)}, EA={x_fp32_layout.element_arrangement}")
+    x_pow2_layout = get_spyre_tensor_layout(x_pow2_spyre)
+    print(f"  After x_fp32.pow(2) - x_pow2: shape={x_pow2_spyre.shape}, stride={x_pow2_spyre.stride()}, dtype={x_pow2_spyre.dtype}")
+    print(f"    Layout: device_size={list(x_pow2_layout.device_size)}, stride_map={list(x_pow2_layout.stride_map)}, EA={x_pow2_layout.element_arrangement}")
+    variance_layout = get_spyre_tensor_layout(variance_spyre)
+    print(f"  After x_pow2.mean(-1, keepdim=True) - variance: shape={variance_spyre.shape}, stride={variance_spyre.stride()}, dtype={variance_spyre.dtype}")
+    print(f"    Layout: device_size={list(variance_layout.device_size)}, stride_map={list(variance_layout.stride_map)}, EA={variance_layout.element_arrangement}")
+    rsqrt_layout = get_spyre_tensor_layout(result_spyre)
+    print(f"  After torch.rsqrt(variance + eps) - rsqrt_var: shape={result_spyre.shape}, stride={result_spyre.stride()}, dtype={result_spyre.dtype}")
+    print(f"    Layout: device_size={list(rsqrt_layout.device_size)}, stride_map={list(rsqrt_layout.stride_map)}, EA={rsqrt_layout.element_arrangement}")
     
     x_fp16_cpu = x_fp16.cpu()
-    result_cpu = compute_rsqrt(x_fp16_cpu)
+    _, _, _, result_cpu = compute_rsqrt(x_fp16_cpu)
     torch.testing.assert_close(result_spyre.cpu(), result_cpu, rtol=1e-3, atol=1e-3)
     
     print(f"✓ RMSNorm Step 3: Rsqrt computation matches CPU ✓")
@@ -225,6 +264,63 @@ def test_rmsnorm_step4_normalization_simple():
         print(f"  Max absolute difference: {diff.max().item():.6f}")
         print(f"  Mean absolute difference: {diff.mean().item():.6f}")
         raise
+
+def test_rmsnorm_step4_normalization_simple_fp16():
+    """
+    Test Step 4 with FP16-only computation (no type conversions).
+    Similar to test_rmsnorm_step4_normalization_simple but computes everything in FP16.
+    This tests the simpler case where all operations stay in FP16 with STANDARD EA throughout.
+    """
+    @torch.compile
+    def normalize_simple_fp16(x, eps=1e-6):
+        variance = x.pow(2).mean(-1, keepdim=True)  # FP16 → FP16 (STANDARD)
+        rsqrt_var = torch.rsqrt(variance + eps)     # FP16 → FP16 (STANDARD)
+        normalized = x * rsqrt_var                   # FP16 * FP16(broadcast) → FP16
+        return variance, rsqrt_var, normalized
+    
+    # Use simple data pattern: random values (torch.ones has a layout bug)
+    x_fp16 = torch.randn((4, 64), dtype=torch.float16, device=device)
+    
+    # Run on Spyre
+    variance_spyre, rsqrt_spyre, normalized_spyre = normalize_simple_fp16(x_fp16)
+    
+    # Run on CPU
+    x_fp16_cpu = x_fp16.cpu()
+    variance_cpu, rsqrt_cpu, normalized_cpu = normalize_simple_fp16(x_fp16_cpu)
+    
+    print(f"\n[DEBUG] Simple data pattern test (all ones, FP16-only):")
+    print(f"  Input shape: {x_fp16.shape}")
+    print(f"  Variance shape: {variance_spyre.shape}")
+    print(f"  Rsqrt shape: {rsqrt_spyre.shape}")
+    print(f"  Normalized shape: {normalized_spyre.shape}")
+    
+    # Check variance (should be ~1.0 for input of ones)
+    print(f"\n  Variance (Spyre): {variance_spyre[0, 0].item():.6f}")
+    print(f"  Variance (CPU):   {variance_cpu[0, 0].item():.6f}")
+    
+    # Check rsqrt (should be ~1.0 for variance of 1.0)
+    print(f"  Rsqrt (Spyre): {rsqrt_spyre[0, 0].item():.6f}")
+    print(f"  Rsqrt (CPU):   {rsqrt_cpu[0, 0].item():.6f}")
+    
+    # Check a few values of normalized result
+    print(f"\n  Normalized[0,0] (Spyre): {normalized_spyre[0, 0].item():.6f}")
+    print(f"  Normalized[0,0] (CPU):   {normalized_cpu[0, 0].item():.6f}")
+    print(f"  Normalized[0,63] (Spyre): {normalized_spyre[0, 63].item():.6f}")
+    print(f"  Normalized[0,63] (CPU):   {normalized_cpu[0, 63].item():.6f}")
+    
+    # Try to compare - this will show where the mismatch is
+    try:
+        torch.testing.assert_close(normalized_spyre.cpu(), normalized_cpu, rtol=1e-3, atol=1e-3)
+        print(f"\n✓ RMSNorm Step 4 (simple, FP16-only): Normalization matches CPU ✓")
+    except AssertionError as e:
+        print(f"\n✗ RMSNorm Step 4 (simple, FP16-only): Mismatch detected")
+        print(f"  Error: {str(e)[:200]}...")
+        # Show max difference
+        diff = torch.abs(normalized_spyre.cpu() - normalized_cpu)
+        print(f"  Max absolute difference: {diff.max().item():.6f}")
+        print(f"  Mean absolute difference: {diff.mean().item():.6f}")
+        raise
+
 
 
 def test_rmsnorm_step4_normalization():
@@ -470,26 +566,28 @@ if __name__ == "__main__":
     failed_tests = 0
     
     try:
-        #test_multiarg_pointwise_with_broadcast()
-        #passed_tests += 1
-        #test_multiarg_same_ea_preserved()
-        #passed_tests += 1
+        test_multiarg_pointwise_with_broadcast()
+        passed_tests += 1
+        test_multiarg_same_ea_preserved()
+        passed_tests += 1
         
         # RMSNorm sub-tests (granular verification)
         print("\n" + "-" * 70)
         print("RMSNorm Normalization Sub-Tests:")
         print("-" * 70)
-        #test_rmsnorm_step1_conversion()
-        #passed_tests += 1
-        #test_rmsnorm_step2_variance()
-        #passed_tests += 1
-        #test_rmsnorm_step3_rsqrt()
-        #passed_tests += 1
+        test_rmsnorm_step1_conversion()
+        passed_tests += 1
+        test_rmsnorm_step2_variance()
+        passed_tests += 1
+        test_rmsnorm_step3_rsqrt()
+        passed_tests += 1
         
         # Diagnostic test with simple data
         print("\n" + "-" * 70)
         print("Diagnostic Test (Simple Data Pattern):")
         print("-" * 70)
+        test_rmsnorm_step4_normalization_simple_fp16()
+        passed_tests += 1
         test_rmsnorm_step4_normalization_simple()
         passed_tests += 1
         
