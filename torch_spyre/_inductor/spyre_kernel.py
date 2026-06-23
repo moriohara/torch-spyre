@@ -462,7 +462,6 @@ class SpyreKernel(Kernel[CSEVariable]):
         self.spyre_kernel_args: list[Tuple[str, TensorArg]] = []
         self.indirect_vars: dict[sympy.Symbol, TensorAccess] = {}
         self._indirect_var_count: int = 0
-        self.output_layouts: dict[str, SpyreTensorLayout] = {}
 
     def __enter__(self) -> Self:
         super().__enter__()
@@ -641,7 +640,6 @@ class SpyreKernel(Kernel[CSEVariable]):
         # (lx buffers are already excluded from spyre_kernel_args in _tensor_arg.)
         if "pool" not in layout.allocation:
             _ = self.args.output(name)
-            self.output_layouts[name] = layout.device_layout
         index = sympy_subs(index, V.graph.sizevars.precomputed_replacements)
         dst = TensorAccess(name, index, layout)
         real_dst_name = V.graph.scheduler.mutation_real_name.get(name, name)
@@ -735,7 +733,6 @@ class SpyreKernel(Kernel[CSEVariable]):
         # (lx buffers are already excluded from spyre_kernel_args in _tensor_arg.)
         if "pool" not in layout.allocation:
             _ = self.args.output(name)
-            self.output_layouts[name] = layout.device_layout
         index = sympy_subs(index, V.graph.sizevars.precomputed_replacements)
         dst = TensorAccess(name, index, layout)
         real_dst_name = V.graph.scheduler.mutation_real_name.get(name, name)
@@ -842,14 +839,8 @@ class SpyreKernel(Kernel[CSEVariable]):
 
         call_args_str = ", ".join(call_args)
         wrapper.writeline(f"{name}.run({call_args_str})")
-        for buf_name, stl in self.output_layouts.items():
-            if stl.element_arrangement != ElementArrangement.STANDARD:
-                ea_str = str(stl.element_arrangement)
-                wrapper.writeline(
-                    f"set_spyre_tensor_layout({buf_name}, "
-                    f"get_spyre_tensor_layout({buf_name})."
-                    f"with_element_arrangement({ea_str}))"
-                )
+        # Note: Element arrangement is now set at allocation time via
+        # SpyreTensorLayout::toString(), so no need to set it after kernel execution
 
 
 def _indirect_syms_used(
