@@ -47,6 +47,21 @@ enum class ElementArrangement {
                  // reductions)
 };
 
+inline std::string elementArrangementToString(ElementArrangement ea) {
+  switch (ea) {
+    case ElementArrangement::STANDARD:
+      return "STANDARD";
+    case ElementArrangement::DL16_TO_FP32:
+      return "DL16_TO_FP32";
+    case ElementArrangement::DL16_TO_FP8:
+      return "DL16_TO_FP8";
+    case ElementArrangement::EXX2:
+      return "EXX2";
+    default:
+      DT_ERROR("Invalid ElementArrangement");
+  }
+}
+
 class SpyreTensorLayout {
  public:
   /**
