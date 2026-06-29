@@ -291,7 +291,7 @@ def _single_arg_op_layout(
             in_elems_per_stick = get_elem_in_stick(in_layout.dtype)
             stick_dim_size = in_layout.size[-1]
             input_ea = stl.element_arrangement
-            
+
             # Determine output EA based on conversion direction and input EA
             if in_layout.dtype == torch.float16 and output.dtype == torch.float32:
                 # FP16 → FP32 conversion
@@ -322,7 +322,7 @@ def _single_arg_op_layout(
             else:
                 # Other type conversions default to STANDARD
                 fmt = ElementArrangement.STANDARD
-            
+
             unaligned = concretize_expr(stick_dim_size % in_elems_per_stick)
 
             if unaligned > 0:
@@ -371,7 +371,10 @@ def _single_arg_op_layout(
         # Input and output tensors are being accessed identically and elem size is the same.
         # We can simply propagate the device_layout including ElementArrangement.
         stl = SpyreTensorLayout(
-            stl.device_size, stl.stride_map, get_device_dtype(output.dtype), stl.element_arrangement
+            stl.device_size,
+            stl.stride_map,
+            get_device_dtype(output.dtype),
+            stl.element_arrangement,
         )
         return [stl]
 
@@ -661,7 +664,10 @@ def _multi_arg_pointwise_layouts(
 
         # Verify STANDARD inputs have stick dimension size 1
         for arg in args:
-            if arg.layouts and arg.layouts[0].element_arrangement == ElementArrangement.STANDARD:
+            if (
+                arg.layouts
+                and arg.layouts[0].element_arrangement == ElementArrangement.STANDARD
+            ):
                 arg_size = arg.layout.size
                 if len(arg_size) == 0:
                     # Scalar - always compatible
@@ -727,7 +733,9 @@ def _multi_arg_pointwise_layouts(
     def _try_stick_dim(stick_dim):
         dim_order = _compute_dim_order(stick_dim, c_size, out_coords)
         if _is_supported_layout(dim_order):
-            results.append(SpyreTensorLayout(c_size, c_stride, output.dtype, dim_order, output_ea))
+            results.append(
+                SpyreTensorLayout(c_size, c_stride, output.dtype, dim_order, output_ea)
+            )
 
     results: list[SpyreTensorLayout] = []
 

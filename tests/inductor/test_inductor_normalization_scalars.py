@@ -127,11 +127,11 @@ class TestNormalizationScalarOperations:
     @pytest.mark.parametrize(
         "eps,batch,seq,hidden",
         [
-            (1e-5, 1, 1,   4096),
-            (1e-5, 1, 12,  4096),
-            (1e-5, 1, 64,  4096),
-            (1e-5, 2, 1,   4096),
-            (1e-5, 2, 12,  4096),
+            (1e-5, 1, 1, 4096),
+            (1e-5, 1, 12, 4096),
+            (1e-5, 1, 64, 4096),
+            (1e-5, 2, 1, 4096),
+            (1e-5, 2, 12, 4096),
         ],
     )
     def test_rmsnorm_fp32_upcast(self, execution_mode, eps, batch, seq, hidden):
@@ -153,7 +153,9 @@ class TestNormalizationScalarOperations:
 
         x = cached_randn((batch, seq, hidden), dtype=torch.float16)
         weight = cached_randn((hidden,), differentiation="weight")
-        _compare_modes(execution_mode, rmsnorm_fp32_upcast, x, weight, atol=1e-2, rtol=1e-2)
+        _compare_modes(
+            execution_mode, rmsnorm_fp32_upcast, x, weight, atol=1e-2, rtol=1e-2
+        )
 
     # TODO: Issue https://github.com/torch-spyre/torch-spyre/issues/2534
     def test_rmsnorm_with_weight(self, execution_mode):
