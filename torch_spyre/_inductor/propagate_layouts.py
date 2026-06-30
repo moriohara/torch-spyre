@@ -289,7 +289,7 @@ def _single_arg_op_layout(
                 return []
 
             in_elems_per_stick = get_elem_in_stick(in_layout.dtype)
-            stick_dim_size = in_layout.size[-1]
+            out_elems_per_stick = get_elem_in_stick(output.dtype)
             input_ea = stl.element_arrangement
 
             # Determine output EA based on conversion direction and input EA
@@ -323,16 +323,27 @@ def _single_arg_op_layout(
                 # Other type conversions default to STANDARD
                 fmt = ElementArrangement.STANDARD
 
-            unaligned = concretize_expr(stick_dim_size % in_elems_per_stick)
-
-            if unaligned > 0:
-                outer_sizes = [concretize_expr(s) for s in output.size[:-1]]
-                outer_strides = [concretize_expr(s) for s in output.stride[:-1]]
-                c_size = outer_sizes + [in_elems_per_stick]
-                c_stride = outer_strides + [1]
-
+            # Propagate the input's physical device layout, scaling only the
+            # stick depth for the dtype change. This preserves non-canonical
+            # layouts (e.g. sparse output from a K-reduction) instead of
+            # reconstructing a dense layout from the logical size/stride.
+            # stl.device_size[-1] == in_elems_per_stick always, so padding
+            # present in the input is preserved without a separate unaligned check.
+            out_device_size = list(stl.device_size)
+            out_stride_map = list(stl.stride_map)
+            out_device_size[-1] = out_elems_per_stick
+            for i, s in enumerate(stl.stride_map):
+                if s == in_elems_per_stick:
+                    out_device_size[i] = (
+                        stl.device_size[i] * in_elems_per_stick // out_elems_per_stick
+                    )
+                    out_stride_map[i] = out_elems_per_stick
+                    break
             stl = SpyreTensorLayout(
-                c_size, c_stride, output.dtype, list(range(len(c_size))), fmt
+                out_device_size,
+                out_stride_map,
+                get_device_dtype(output.dtype),
+                fmt,
             )
             return [stl]
 
