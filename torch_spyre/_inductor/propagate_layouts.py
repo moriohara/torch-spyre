@@ -746,7 +746,6 @@ def _multi_arg_pointwise_layouts(
                 template_stl.device_size,
                 template_stl.stride_map,
                 get_device_dtype(output.dtype),
-                template_stl.dim_order,
                 output_ea,
             )
         )
