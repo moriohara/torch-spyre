@@ -240,29 +240,15 @@ def _rescale_stl_for_dtype(
     out_device_size = list(stl.device_size)
     out_stride_map = list(stl.stride_map)
     out_device_size[-1] = out_eps
-    # Rescale the single non-stick dim that indexes whole sticks (stride == the
-    # input stick depth). A canonical/contiguous layout always has exactly one
-    # such dim. A staggered/sparse layout (e.g. the DL16_TO_FP32 restoration
-    # operand, whose stride_map carries sentinel -1 entries rather than a linear
-    # num-sticks stride) has none — there only the stick depth changes, which is
-    # correct, so a no-match is expected and left as-is.
+    # Rescale the first non-stick dim that indexes whole sticks (stride == the
+    # input stick depth) by the stick-depth ratio. A staggered/sparse layout
+    # (e.g. the DL16_TO_FP32 restoration operand, whose stride_map carries
+    # sentinel -1 entries rather than a linear num-sticks stride) has no such
+    # dim; there only the stick depth changes, so a no-match is expected and
+    # left as-is.
     for i, s in enumerate(stl.stride_map):
         if s == in_eps:
-            # This rescale must divide evenly: when it doesn't (e.g. an odd stick
-            # count shrinking the stick depth, in_eps < out_eps), integer
-            # division would silently drop elements. In practice callers hit even
-            # counts (RMSNorm uses hidden=4096), but guard so a future
-            # non-divisible case fails loudly rather than corrupting the layout.
-            # Padding to align the stick depth is not yet supported (see #1756).
-            total = stl.device_size[i] * in_eps
-            if total % out_eps != 0:
-                raise Unsupported(
-                    f"dtype conversion cannot rescale num-sticks dim: "
-                    f"{stl.device_size[i]} sticks * {in_eps} elems/stick is not "
-                    f"divisible by {out_eps} out elems/stick; padding to align "
-                    f"the stick depth is not yet supported (see #1756)"
-                )
-            out_device_size[i] = total // out_eps
+            out_device_size[i] = stl.device_size[i] * in_eps // out_eps
             out_stride_map[i] = out_eps
             break
     return SpyreTensorLayout(
