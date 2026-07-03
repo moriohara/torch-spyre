@@ -31,11 +31,18 @@ FP8TODL16_OP = "fp8todl16"
 
 DEVICE_NAME = "spyre"
 
-# ElementArrangements produced by on-device type conversions that leave device
-# coordinates non-sequential ("staggered"). A staggered EA may co-exist with
-# STANDARD inputs on a multi-arg pointwise op (the broadcast pattern); see
-# is_ea_compatible below. Kept in one place so every site that reasons about
-# EA compatibility shares the same definition.
+# The staggered EAs produced by the bidirectional fp16<->fp32 on-device
+# conversions, whose device coordinates are non-sequential and (unlike QFP8CH)
+# can be restored by the reverse conversion. propagate_layouts uses this set for
+# two things: (1) deciding a dtype conversion must PRESERVE the input device
+# layout (rescale in place) rather than reconstruct a dense one, and (2) picking
+# the output EA / gating the broadcast handling in a multi-arg pointwise.
+#
+# NOTE: this is deliberately narrower than "all non-STANDARD EAs". is_ea_compatible
+# does NOT use this set — it treats any single non-STANDARD EA (except EXX2) as
+# broadcastable. QFP8CH is intentionally excluded here because membership also
+# forces the convert-preserve path, which would mishandle the degenerate qfp8ch
+# convert layout.
 STAGGERED_EAS = frozenset(
     {
         ElementArrangement.DL16_TO_FP32,
