@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from torch_spyre._C import ElementArrangement
+
 BATCH_MATMUL_OP = "batchmatmul"
 IDENTITY_OP = "identity"
 RESTICKIFY_OP = "ReStickifyOpHBM"
@@ -28,6 +30,45 @@ FP32TODL16_OP = "fp32todl16"
 FP8TODL16_OP = "fp8todl16"
 
 DEVICE_NAME = "spyre"
+
+# ElementArrangements produced by on-device type conversions that leave device
+# coordinates non-sequential ("staggered"). A staggered EA may co-exist with
+# STANDARD inputs on a multi-arg pointwise op (the broadcast pattern); see
+# is_ea_compatible below. Kept in one place so every site that reasons about
+# EA compatibility shares the same definition.
+STAGGERED_EAS = frozenset(
+    {
+        ElementArrangement.DL16_TO_FP32,
+        ElementArrangement.FP32_TO_DL16,
+    }
+)
+
+
+def is_ea_compatible(eas) -> bool:
+    """Return True if the given ElementArrangements can co-exist on one multi-arg
+    pointwise op.
+
+    Valid patterns:
+      1. All inputs share a single EA.
+      2. Exactly one staggered EA (see STAGGERED_EAS) mixed only with STANDARD
+         inputs (the broadcast pattern).
+
+    This predicate governs EA-*set* membership only. The additional device-layout
+    constraint that STANDARD operands in the mixed case must have stick-dimension
+    size 1 is enforced separately in ``_multi_arg_pointwise_layouts`` where the
+    concrete layouts are available.
+
+    Args:
+        eas: An iterable of ElementArrangement values (duplicates allowed).
+    """
+    unique = set(eas)
+    if len(unique) <= 1:
+        return True
+    staggered = unique & STAGGERED_EAS
+    return len(staggered) == 1 and unique <= (
+        STAGGERED_EAS | {ElementArrangement.STANDARD}
+    )
+
 
 # Marker on a ComputedBuffer that should be considered for copy-back removal.
 # ``aten.copy_`` lowering sets this on the explicit copy-back mutation op; layout

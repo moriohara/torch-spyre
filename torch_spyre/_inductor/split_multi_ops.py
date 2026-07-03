@@ -26,6 +26,7 @@ from torch.utils._ordered_set import OrderedSet
 from .logging_utils import get_inductor_logger
 from .errors import Unsupported
 from .pass_utils import replace_computed_buffer_body
+from .constants import is_ea_compatible
 from torch_spyre._C import SpyreTensorLayout, ElementArrangement
 from torch_spyre.constants import DEVICE_NAME
 
@@ -663,34 +664,18 @@ def validate_ops(graph: GraphLowering) -> None:
         if op_name in skip_ops and any(ea in skip_eas for ea in stl_eas):
             continue
 
-        unique_eas = set(stl_eas)
-
-        # Valid EA patterns:
+        # Valid EA patterns (see is_ea_compatible):
         # 1. All same EA
         # 2. One staggered EA (DL16_TO_FP32 or FP32_TO_DL16) + STANDARD (broadcast pattern)
-        if len(unique_eas) > 1:
-            staggered_eas = {
-                ElementArrangement.DL16_TO_FP32,
-                ElementArrangement.FP32_TO_DL16,
-            }
-            staggered_in_op = unique_eas & staggered_eas
-
-            # Check if it's the valid broadcast pattern:
-            # - Exactly one staggered EA type
-            # - Only STANDARD and that staggered EA present
-            is_valid_broadcast = len(staggered_in_op) == 1 and unique_eas <= (
-                staggered_eas | {ElementArrangement.STANDARD}
+        if not is_ea_compatible(stl_eas):
+            args_str = ", ".join(
+                f'"{name}": {ea}' for name, ea in zip(input_names, stl_eas)
             )
-
-            if not is_valid_broadcast:
-                args_str = ", ".join(
-                    f'"{name}": {ea}' for name, ea in zip(input_names, stl_eas)
-                )
-                raise Unsupported(
-                    f"Incompatible ElementArrangement in multi-arg op. "
-                    f"Valid patterns: all same EA, or one staggered EA + STANDARD (broadcast). "
-                    f"op: {op_name}, args: {args_str}"
-                )
+            raise Unsupported(
+                f"Incompatible ElementArrangement in multi-arg op. "
+                f"Valid patterns: all same EA, or one staggered EA + STANDARD (broadcast). "
+                f"op: {op_name}, args: {args_str}"
+            )
 
 
 def split_multi_ops(graph: GraphLowering):

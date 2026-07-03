@@ -54,6 +54,7 @@ from .constants import (
     COPY_BACK_CANDIDATE_ATTR,
     ELIDED_COPY_BACK_ATTR,
     REDUCTIONS_NON_STICK_DIM_ONLY,
+    STAGGERED_EAS,
     TOPK_OPS,
 )
 from .ir import FixedTiledLayout, SpyreConstantFallback
@@ -212,6 +213,66 @@ def _check_supported_input_sticks(args: list[PropArg], op_label: str) -> None:
                 )
 
 
+def _rescale_stl_for_dtype(
+    stl: SpyreTensorLayout,
+    out_dtype: torch.dtype,
+    ea: ElementArrangement,
+) -> SpyreTensorLayout:
+    """Propagate a device layout across a same-shape, differing-stick-depth dtype conversion.
+
+    Copies the input STL's ``device_size``/``stride_map`` and rescales the stick
+    depth (the last device dim) plus, when present, the one non-stick dim whose
+    stride equals the input stick depth. This preserves any non-canonical layout
+    or padding present in the input STL instead of reconstructing a dense layout
+    from the logical size/stride.
+
+    The input elements-per-stick is read from ``stl.device_size[-1]`` (the stick
+    dimension is always full, so it equals ``get_elem_in_stick(in_dtype)``); the
+    output count comes from ``out_dtype``.
+
+    Args:
+        stl: Input device layout to rescale.
+        out_dtype: Torch dtype of the conversion output.
+        ea: ElementArrangement to stamp on the returned layout.
+    """
+    in_eps = stl.device_size[-1]
+    out_eps = get_elem_in_stick(out_dtype)
+    out_device_size = list(stl.device_size)
+    out_stride_map = list(stl.stride_map)
+    out_device_size[-1] = out_eps
+    # Rescale the single non-stick dim that indexes whole sticks (stride == the
+    # input stick depth). A canonical/contiguous layout always has exactly one
+    # such dim. A staggered/sparse layout (e.g. the DL16_TO_FP32 restoration
+    # operand, whose stride_map carries sentinel -1 entries rather than a linear
+    # num-sticks stride) has none — there only the stick depth changes, which is
+    # correct, so a no-match is expected and left as-is.
+    for i, s in enumerate(stl.stride_map):
+        if s == in_eps:
+            # This rescale must divide evenly: when it doesn't (e.g. an odd stick
+            # count shrinking the stick depth, in_eps < out_eps), integer
+            # division would silently drop elements. In practice callers hit even
+            # counts (RMSNorm uses hidden=4096), but guard so a future
+            # non-divisible case fails loudly rather than corrupting the layout.
+            # Padding to align the stick depth is not yet supported (see #1756).
+            total = stl.device_size[i] * in_eps
+            if total % out_eps != 0:
+                raise Unsupported(
+                    f"dtype conversion cannot rescale num-sticks dim: "
+                    f"{stl.device_size[i]} sticks * {in_eps} elems/stick is not "
+                    f"divisible by {out_eps} out elems/stick; padding to align "
+                    f"the stick depth is not yet supported (see #1756)"
+                )
+            out_device_size[i] = total // out_eps
+            out_stride_map[i] = out_eps
+            break
+    return SpyreTensorLayout(
+        out_device_size,
+        out_stride_map,
+        get_device_dtype(out_dtype),
+        ea,
+    )
+
+
 def _single_arg_op_layout(
     op: Operation,
     output: FixedLayout,
@@ -294,8 +355,6 @@ def _single_arg_op_layout(
             if not is_stick_expr_offset_free(in_stick_expr, stl.elems_per_stick()):
                 return []
 
-            in_elems_per_stick = get_elem_in_stick(in_layout.dtype)
-            out_elems_per_stick = get_elem_in_stick(output.dtype)
             input_ea = stl.element_arrangement
 
             # Determine output EA based on conversion direction and input EA
@@ -333,48 +392,14 @@ def _single_arg_op_layout(
             # stick depth for the dtype change. This preserves non-canonical
             # layouts (e.g. sparse output from a K-reduction) instead of
             # reconstructing a dense layout from the logical size/stride.
-            # stl.device_size[-1] == in_elems_per_stick always, so padding
-            # present in the input is preserved without a separate unaligned check.
-            out_device_size = list(stl.device_size)
-            out_stride_map = list(stl.stride_map)
-            out_device_size[-1] = out_elems_per_stick
-            for i, s in enumerate(stl.stride_map):
-                if s == in_elems_per_stick:
-                    out_device_size[i] = (
-                        stl.device_size[i] * in_elems_per_stick // out_elems_per_stick
-                    )
-                    out_stride_map[i] = out_elems_per_stick
-                    break
-            stl = SpyreTensorLayout(
-                out_device_size,
-                out_stride_map,
-                get_device_dtype(output.dtype),
-                fmt,
-            )
-            return [stl]
+            return [_rescale_stl_for_dtype(stl, output.dtype, fmt)]
 
         case spyreop.qfp8ch.default:
             # fp16 (64 elems/stick) -> fp8 (128 elems/stick) quantization.
             # Propagate the input device layout and rescale for the dtype change,
             # preserving any padding present in the input STL.
-            elem_arr = ElementArrangement.QFP8CH
-            in_eps = get_elem_in_stick(in_layout.dtype)
-            out_eps = get_elem_in_stick(output.dtype)
-            out_device_size = list(stl.device_size)
-            out_stride_map = list(stl.stride_map)
-            out_device_size[-1] = out_eps
-            for i, s in enumerate(stl.stride_map):
-                if s == in_eps:
-                    out_device_size[i] = stl.device_size[i] * in_eps // out_eps
-                    out_stride_map[i] = out_eps
-                    break
             return [
-                SpyreTensorLayout(
-                    out_device_size,
-                    out_stride_map,
-                    get_device_dtype(output.dtype),
-                    elem_arr,
-                )
+                _rescale_stl_for_dtype(stl, output.dtype, ElementArrangement.QFP8CH)
             ]
 
     in_coords = host_coordinates(in_layout, dep, None)
@@ -666,9 +691,14 @@ def _multi_arg_pointwise_layouts(
             # Get EA from first SpyreTensorLayout (all should have same EA for this input)
             input_eas.add(arg.layouts[0].element_arrangement)
 
-    # Determine output EA based on input EAs
-    staggered_eas = {ElementArrangement.DL16_TO_FP32, ElementArrangement.FP32_TO_DL16}
-    staggered_inputs = input_eas & staggered_eas
+    # Determine output EA based on input EAs. The full EA-compatibility rule is
+    # enforced later by validate_ops via the shared is_ea_compatible predicate;
+    # here we only reject the one case propagation itself cannot represent
+    # (more than one distinct staggered EA) and otherwise pick the output EA.
+    # We deliberately do NOT run is_ea_compatible here: validate_ops skips
+    # layernorm ops carrying EXX2, and this join point sees those ops too, so a
+    # blanket gate here would over-reject valid layernorm/EXX2 combinations.
+    staggered_inputs = input_eas & STAGGERED_EAS
 
     if len(staggered_inputs) > 1:
         # Multiple different staggered EAs - not supported
@@ -676,29 +706,54 @@ def _multi_arg_pointwise_layouts(
             f"Multi-arg pointwise with multiple staggered EAs not supported: {input_eas}"
         )
     elif len(staggered_inputs) == 1:
-        # One staggered EA with potential STANDARD inputs
-        # Hardware constraint: STANDARD inputs must have stick dimension size 1
-        # to broadcast correctly with staggered element ordering
+        # One staggered EA mixed with STANDARD inputs (the broadcast pattern).
         output_ea = next(iter(staggered_inputs))
 
-        # Verify STANDARD inputs have stick dimension size 1
+        # A STANDARD operand can broadcast against a staggered-EA operand only if
+        # its device *stick* dimension enumerates at most one distinct host
+        # element, i.e. the stick maps to a size-1 (broadcast) host axis. The
+        # element arrangement is a device-layout property, so we must test the
+        # host axis the device stick actually maps to, not a fixed host axis.
+        #
+        # In an STL the stick is the last device dim and `stride_map[-1]` is its
+        # host stride; the layout constructor (spyre_tensor_impl.cpp) sets that
+        # entry to -1 exactly when the mapped host axis has size 1 (or the stick
+        # is sparse). So `stride_map[-1] == -1` is the correct, dim_order-
+        # independent test. Reading `arg.layout.size[-1]` instead only works when
+        # dim_order is the identity (stick == last host dim); under a non-identity
+        # dim_order the device stick may map to a size-1 axis that is not last
+        # (e.g. host size [1, 64, 1] with the stick on a size-1 axis), which the
+        # trailing-dim check would mishandle.
         for arg in args:
-            if (
-                arg.layouts
-                and arg.layouts[0].element_arrangement == ElementArrangement.STANDARD
-            ):
-                arg_size = arg.layout.size
-                if len(arg_size) == 0:
-                    # Scalar - always compatible
+            if not arg.layouts:
+                continue
+            for stl in arg.layouts:
+                if stl.element_arrangement != ElementArrangement.STANDARD:
                     continue
-
-                arg_stick_size = arg_size[-1]  # Stick is last dimension
-                if arg_stick_size != 1:
-                    raise Unsupported(
-                        f"Multi-arg pointwise with mixed EA: STANDARD input must have "
-                        f"stick dimension size 1 for broadcast compatibility with staggered EA. "
-                        f"Got stick size {arg_stick_size}"
-                    )
+                if len(arg.layout.size) == 0:
+                    # Scalar - always compatible.
+                    continue
+                if stl.stride_map[-1] == -1:
+                    # Device stick maps to a size-1 (broadcast) / sparse host
+                    # axis: compatible.
+                    continue
+                # Stick maps to a real host axis; identify it for the message.
+                c_stride = [concretize_expr(s) for s in arg.layout.stride]
+                mapped = next(
+                    (d for d, hs in enumerate(c_stride) if hs == stl.stride_map[-1]),
+                    None,
+                )
+                mapped_size = (
+                    concretize_expr(arg.layout.size[mapped])
+                    if mapped is not None
+                    else "unknown"
+                )
+                raise Unsupported(
+                    f"Multi-arg pointwise with mixed EA: STANDARD input {arg.dep.name} "
+                    f"must broadcast (device stick dimension size 1) to be compatible "
+                    f"with a staggered EA. Its stick maps to host dim {mapped} of size "
+                    f"{mapped_size}"
+                )
     else:
         # All STANDARD or other EAs - use STANDARD
         output_ea = ElementArrangement.STANDARD
