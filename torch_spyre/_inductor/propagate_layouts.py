@@ -374,11 +374,39 @@ def _single_arg_op_layout(
                 # Other type conversions default to STANDARD
                 fmt = ElementArrangement.STANDARD
 
-            # Propagate the input's physical device layout, scaling only the
-            # stick depth for the dtype change. This preserves non-canonical
-            # layouts (e.g. sparse output from a K-reduction) instead of
-            # reconstructing a dense layout from the logical size/stride.
-            return [_rescale_stl_for_dtype(stl, output.dtype, fmt)]
+            # Two strategies, chosen by whether a staggered EA is involved:
+            #
+            # 1. Staggered conversions (RMSNorm up/down-cast and their
+            #    restoration: STANDARD<->DL16_TO_FP32 / FP32_TO_DL16). The
+            #    staggered element ordering only exists on the physical device
+            #    layout, so we must propagate the input's device_size/stride_map
+            #    and rescale just the stick depth via _rescale_stl_for_dtype.
+            #    Reconstructing from the logical host size would lose it.
+            #
+            # 2. Plain conversions (e.g. fp8->fp16 after qfp8ch). Here the input
+            #    device layout can be degenerate — qfp8ch rescales a size-1
+            #    num-sticks dim to 0 (1*64//128), leaving a size-0 dim — and
+            #    _rescale_stl_for_dtype would faithfully propagate that garbage,
+            #    changing the layout rank and downstream graph partitioning.
+            #    Rebuild a clean dense layout from the output host size instead,
+            #    as the general (non-EA) convert path does.
+            if fmt in STAGGERED_EAS or input_ea in STAGGERED_EAS:
+                return [_rescale_stl_for_dtype(stl, output.dtype, fmt)]
+
+            # Dense reconstruction from the output host size. When the input
+            # stick dim is unaligned, force a full input-stick depth so stick
+            # padding is reflected in the device layout (see #1756 example above).
+            in_elems_per_stick = get_elem_in_stick(in_layout.dtype)
+            if concretize_expr(in_layout.size[-1] % in_elems_per_stick) > 0:
+                c_size = [concretize_expr(s) for s in output.size[:-1]] + [
+                    in_elems_per_stick
+                ]
+                c_stride = [concretize_expr(s) for s in output.stride[:-1]] + [1]
+            return [
+                SpyreTensorLayout(
+                    c_size, c_stride, output.dtype, list(range(len(c_size))), fmt
+                )
+            ]
 
         case spyreop.qfp8ch.default:
             # fp16 (64 elems/stick) -> fp8 (128 elems/stick) quantization.
