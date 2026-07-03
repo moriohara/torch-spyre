@@ -77,6 +77,14 @@ def is_ea_compatible(eas) -> bool:
 
     # Case 2: mixed EAs are only the broadcast pattern — exactly one distinct
     # non-STANDARD EA (and it must not be EXX2), with the rest STANDARD.
+    #
+    # NOTE: this accepts QFP8CH + STANDARD, but no current graph produces that
+    # combination — QFP8CH tensors are consumed by an fp8 matmul or the fp8->fp16
+    # convert, never a multi-arg pointwise. So QFP8CH is intentionally kept OUT of
+    # STAGGERED_EAS (which doubles as the "convert must preserve the device
+    # layout" gate; adding QFP8CH there would mis-handle the degenerate qfp8ch
+    # convert layout). If QFP8CH broadcast ever becomes real, split those two
+    # uses rather than widening STAGGERED_EAS.
     non_standard = unique - {ElementArrangement.STANDARD}
     return len(non_standard) == 1 and ElementArrangement.EXX2 not in non_standard
 
