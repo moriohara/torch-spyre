@@ -665,15 +665,17 @@ def validate_ops(graph: GraphLowering) -> None:
             continue
 
         # Valid EA patterns (see is_ea_compatible):
-        # 1. All same EA
-        # 2. One staggered EA (DL16_TO_FP32 or FP32_TO_DL16) + STANDARD (broadcast pattern)
+        # 1. All operands share one EA.
+        # 2. Exactly one distinct non-STANDARD EA (not EXX2) mixed with STANDARD
+        #    operands (the broadcast pattern).
         if not is_ea_compatible(stl_eas):
             args_str = ", ".join(
                 f'"{name}": {ea}' for name, ea in zip(input_names, stl_eas)
             )
             raise Unsupported(
                 f"Incompatible ElementArrangement in multi-arg op. "
-                f"Valid patterns: all same EA, or one staggered EA + STANDARD (broadcast). "
+                f"Valid patterns: all inputs share one EA, or one non-STANDARD EA "
+                f"broadcast against STANDARD inputs. "
                 f"op: {op_name}, args: {args_str}"
             )
 
