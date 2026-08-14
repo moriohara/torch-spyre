@@ -33,37 +33,43 @@ import warnings
 from typing import Iterator, List
 
 try:  # torch_spyre may be absent during collection on a non-device host
-    from torch_spyre.ops.fallbacks import FallbackWarning
+    from torch_spyre.ops.fallbacks import FallbackWarning, fallback_ops
 except Exception:  # pragma: no cover - import guard
     FallbackWarning = None  # type: ignore[assignment, misc]
+    fallback_ops = []
 
 ALLOW_ENV = "SPYRE_OPTEST_ALLOW_CPU_FALLBACK"
 
-# aten ops that have NO Spyre device kernel: a CPU fallback here is expected and
-# is reported, not failed. Kept in sync with the CPU-fallback ops registered in
-# torch_spyre/ops/fallbacks.py, MINUS ops that do have a device kernel (e.g.
-# index_copy via index_put) -- for those a fallback masks a real bug and must
-# fail. int<->float dtype conversions (a known device limitation) are also
-# treated as a known gap.
-_KNOWN_NO_KERNEL_OPS = (
-    "aten.sin",
-    "aten.cos",
-    "aten.arange",
-    "aten.cumsum",
-    "aten.repeat",
-    "aten.tril",
-    "aten.triu",
-    "aten.isin",
-    "aten.argmax",
-    "aten.argmin",
-    "aten.where",
-    "aten.bitwise_xor",
-    "aten.bitwise_or",
-    "aten.ne",
-    "aten.any",
-    "aten.normal",
-    "aten.random",
-)
+# Ops registered with a CPU fallback that nonetheless HAVE a real Spyre device
+# kernel: a fallback for one of these masks a device bug and must fail the test,
+# so they are excluded from the known-gap set below. (index_copy runs on-device
+# via index_put.)
+_HAS_DEVICE_KERNEL = ("aten.index_copy",)
+
+
+def _known_no_kernel_ops() -> frozenset:
+    """Names of ops whose CPU fallback is an expected no-device-kernel gap.
+
+    Derived from ``fallback_ops`` (the fallback registry in
+    ``torch_spyre.ops.fallbacks``) so that module stays the single source of
+    truth rather than duplicating the list here; we only subtract the ops that
+    do have a device kernel (``_HAS_DEVICE_KERNEL``). Names are matched as a
+    substring of the fallback warning message, so packet-level names
+    (``aten.sin``) transparently cover every overload.
+    """
+    names = set()
+    for op in fallback_ops:
+        # OpOverload -> packet-level name (aten.cumsum.default -> aten.cumsum);
+        # string custom ops (e.g. "spyre::...") are kept verbatim.
+        name = str(getattr(op, "overloadpacket", op))
+        if not name.startswith(_HAS_DEVICE_KERNEL):
+            names.add(name)
+    return frozenset(names)
+
+
+# int<->float dtype conversions (a known device limitation) are treated as a
+# known gap separately, in ``_is_known_gap``.
+_KNOWN_NO_KERNEL_OPS = _known_no_kernel_ops()
 
 
 def _is_known_gap(message: str) -> bool:
