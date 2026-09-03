@@ -1911,6 +1911,27 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 ),
             },
         },
+        # int32 inputs: exercises the Spyre-specific le lowering that uses
+        # INT_TO_FLOAT promotion to cast int32 → fp32 before the native le op.
+        ("test_le_int32", "test_le_int32_cpu"): {
+            "ops_dict": {
+                "le": torch.le,
+            },
+            "param_sets": {
+                "int32_1d": (
+                    torch.randint(-10, 10, (256,), dtype=torch.int32),
+                    torch.randint(-10, 10, (256,), dtype=torch.int32),
+                ),
+                "int32_2d": (
+                    torch.randint(-10, 10, (64, 128), dtype=torch.int32),
+                    torch.randint(-10, 10, (64, 128), dtype=torch.int32),
+                ),
+                "int32_broadcast": (
+                    torch.randint(-10, 10, (64, 128), dtype=torch.int32),
+                    torch.randint(-10, 10, (128,), dtype=torch.int32),
+                ),
+            },
+        },
         ("test_cmp_scalar_int64", "test_cmp_scalar_int64_cpu"): {
             "ops_dict": {
                 "ne": torch.ne,
@@ -6021,6 +6042,16 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
     def test_cmp_scalar_int64_cpu(self, op, x, scalar):
         # Test comparison ops with int64 tensors and scalar values.
         self.compare_with_cpu(op, x, scalar, run_eager=True, run_compile=False)
+
+    def test_le_int32_cpu(self, op, x, y):
+        # int32 inputs: the Spyre lowering applies INT_TO_FLOAT promotion,
+        # casting both operands to fp32 before the native le op runs.
+        # The Spyre result is float32 (1.0/0.0); wrap the op so the CPU
+        # reference also returns float32 for an apples-to-apples comparison.
+        def fp32_le(a, b):
+            return op(a, b).to(torch.float32)
+
+        self.compare_with_cpu(fp32_le, x, y, run_eager=True)
 
     def test_linear_fn(self, x, weight, bias):
         # NOTE: relaxing atol from 2e-1 to 3e-1 for multi-dim work division, single element fails without

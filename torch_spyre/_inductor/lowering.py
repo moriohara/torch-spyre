@@ -325,6 +325,23 @@ def _ensure_synthetic_origin(result, target, args: tuple) -> None:
     buf.origins = OrderedSet([fx_node])
 
 
+# aten.le: override the upstream ALWAYS_BOOL + override_return_dtype=torch.bool
+# lowering.  On Spyre the hardware native "le" op takes fp32 operands and
+# returns fp32, so we use INT_TO_FLOAT type promotion: int32 (or bool) inputs
+# are automatically cast to fp32 by transform_args, the op runs in fp32, and
+# the result dtype is fp32 (no override_return_dtype).  The Spyre layout system
+# then tags the fp32 output buffer as torch.bool via infer_bool_device_dtype,
+# so downstream consumers see the correct logical dtype.
+@register_spyre_lowering(
+    [torch.ops.aten.le.Tensor, torch.ops.aten.le.Scalar],
+    name="le",
+    broadcast=True,
+    type_promotion_kind=lowering.ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT,
+)
+def lower_le(a, b):
+    return lowering.make_pointwise(lowering.ops_wrapper("le"))(a, b)
+
+
 @register_spyre_lowering(torch.ops.spyre.scaled_mm.default)
 def lower_scaled_mm(
     mat1,
