@@ -1911,13 +1911,17 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 ),
             },
         },
-        # int32 inputs: exercises the Spyre-specific le lowering that uses
-        # INT_TO_FLOAT promotion to cast int32 → fp32 before the native le op.
-        ("test_le_int32", "test_le_int32_cpu"): {
+        # Exercises the Spyre-specific le lowering (INT_TO_FLOAT promotion):
+        #   int32 × int32  – both cast to fp32 by transform_args
+        #   fp32  × fp32   – no cast needed; result is fp32
+        #   int32 × fp32   – int32 side cast to fp32; mixed-dtype comparison
+        # All three variants return float32 on Spyre (1.0 / 0.0).
+        ("test_le_dtypes", "test_le_dtypes_cpu"): {
             "ops_dict": {
                 "le": torch.le,
             },
             "param_sets": {
+                # --- int32 × int32 ---
                 "int32_1d": (
                     torch.randint(-10, 10, (256,), dtype=torch.int32),
                     torch.randint(-10, 10, (256,), dtype=torch.int32),
@@ -1929,6 +1933,32 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 "int32_broadcast": (
                     torch.randint(-10, 10, (64, 128), dtype=torch.int32),
                     torch.randint(-10, 10, (128,), dtype=torch.int32),
+                ),
+                # --- fp32 × fp32 ---
+                "fp32_1d": (
+                    torch.ceil(cached_randn((256,), abs=True, scale=10.0, dtype=torch.float32)),
+                    torch.ceil(cached_randn((256,), abs=True, scale=9.9, dtype=torch.float32)),
+                ),
+                "fp32_2d": (
+                    torch.ceil(cached_randn((64, 128), abs=True, scale=10.0, dtype=torch.float32)),
+                    torch.ceil(cached_randn((64, 128), abs=True, scale=9.9, dtype=torch.float32)),
+                ),
+                "fp32_broadcast": (
+                    torch.ceil(cached_randn((64, 128), abs=True, scale=10.0, dtype=torch.float32)),
+                    torch.ceil(cached_randn((128,), abs=True, scale=9.9, dtype=torch.float32)),
+                ),
+                # --- int32 × fp32 (mixed): int32 side is promoted to fp32 ---
+                "int32_fp32_1d": (
+                    torch.randint(-10, 10, (256,), dtype=torch.int32),
+                    torch.ceil(cached_randn((256,), abs=True, scale=9.9, dtype=torch.float32)),
+                ),
+                "int32_fp32_2d": (
+                    torch.randint(-10, 10, (64, 128), dtype=torch.int32),
+                    torch.ceil(cached_randn((64, 128), abs=True, scale=9.9, dtype=torch.float32)),
+                ),
+                "int32_fp32_broadcast": (
+                    torch.randint(-10, 10, (64, 128), dtype=torch.int32),
+                    torch.ceil(cached_randn((128,), abs=True, scale=9.9, dtype=torch.float32)),
                 ),
             },
         },
@@ -6043,11 +6073,11 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         # Test comparison ops with int64 tensors and scalar values.
         self.compare_with_cpu(op, x, scalar, run_eager=True, run_compile=False)
 
-    def test_le_int32_cpu(self, op, x, y):
-        # int32 inputs: the Spyre lowering applies INT_TO_FLOAT promotion,
-        # casting both operands to fp32 before the native le op runs.
-        # The Spyre result is float32 (1.0/0.0); wrap the op so the CPU
-        # reference also returns float32 for an apples-to-apples comparison.
+    def test_le_dtypes_cpu(self, op, x, y):
+        # Covers int32×int32, fp32×fp32, and int32×fp32 inputs for torch.le.
+        # The Spyre lowering uses INT_TO_FLOAT promotion: int32 operands are
+        # cast to fp32, the native le op runs in fp32, and the result is
+        # float32 (1.0/0.0).  Wrap the CPU reference to also return float32.
         def fp32_le(a, b):
             return op(a, b).to(torch.float32)
 
