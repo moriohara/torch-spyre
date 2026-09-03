@@ -1960,6 +1960,19 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     torch.randint(-10, 10, (64, 128), dtype=torch.int32),
                     torch.ceil(cached_randn((128,), abs=True, scale=9.9, dtype=torch.float32)),
                 ),
+                # --- bool × bool: no fp cast; result is torch.bool ---
+                "bool_1d": (
+                    torch.randint(0, 2, (256,), dtype=torch.bool),
+                    torch.randint(0, 2, (256,), dtype=torch.bool),
+                ),
+                "bool_2d": (
+                    torch.randint(0, 2, (64, 128), dtype=torch.bool),
+                    torch.randint(0, 2, (64, 128), dtype=torch.bool),
+                ),
+                "bool_broadcast": (
+                    torch.randint(0, 2, (64, 128), dtype=torch.bool),
+                    torch.randint(0, 2, (128,), dtype=torch.bool),
+                ),
                 # --- fp16 × fp16: result is float16 on Spyre (SEN169_FP16 bool) ---
                 "fp16_1d": (
                     torch.ceil(cached_randn((256,), abs=True, scale=10.0)).to(torch.float16),
@@ -6087,16 +6100,17 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         self.compare_with_cpu(op, x, scalar, run_eager=True, run_compile=False)
 
     def test_le_dtypes_cpu(self, op, x, y):
-        # Covers int32×int32, fp32×fp32, int32×fp32, and fp16×fp16 inputs.
-        # Spyre's le lowering uses INT_TO_FLOAT promotion: integer operands
-        # are cast to the computation dtype before the native op runs, and
-        # the result carries that same dtype (fp32 or fp16) rather than bool.
-        # Derive the expected output dtype the same way the lowering does so
-        # the CPU reference always matches what Spyre produces.
+        # Covers bool×bool, int32×int32, fp32×fp32, int32×fp32, fp16×fp16.
+        # The Spyre lowering dispatches on input dtype:
+        #   bool × bool  → ALWAYS_BOOL  (result: torch.bool)
+        #   otherwise    → INT_TO_FLOAT (result: fp32 or fp16)
+        # Derive result_dtype the same way so the CPU reference matches.
         from torch._prims_common import elementwise_dtypes, ELEMENTWISE_TYPE_PROMOTION_KIND
-        _, result_dtype = elementwise_dtypes(
-            x, y, type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT
-        )
+        if x.dtype == torch.bool and y.dtype == torch.bool:
+            kind = ELEMENTWISE_TYPE_PROMOTION_KIND.ALWAYS_BOOL
+        else:
+            kind = ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT
+        _, result_dtype = elementwise_dtypes(x, y, type_promotion_kind=kind)
 
         def promoted_le(a, b):
             return op(a, b).to(result_dtype)
