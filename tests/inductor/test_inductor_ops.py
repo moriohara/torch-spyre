@@ -1960,6 +1960,19 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     torch.randint(-10, 10, (64, 128), dtype=torch.int32),
                     torch.ceil(cached_randn((128,), abs=True, scale=9.9, dtype=torch.float32)),
                 ),
+                # --- fp16 × fp16: result is float16 on Spyre (SEN169_FP16 bool) ---
+                "fp16_1d": (
+                    torch.ceil(cached_randn((256,), abs=True, scale=10.0)).to(torch.float16),
+                    torch.ceil(cached_randn((256,), abs=True, scale=9.9)).to(torch.float16),
+                ),
+                "fp16_2d": (
+                    torch.ceil(cached_randn((64, 128), abs=True, scale=10.0)).to(torch.float16),
+                    torch.ceil(cached_randn((64, 128), abs=True, scale=9.9)).to(torch.float16),
+                ),
+                "fp16_broadcast": (
+                    torch.ceil(cached_randn((64, 128), abs=True, scale=10.0)).to(torch.float16),
+                    torch.ceil(cached_randn((128,), abs=True, scale=9.9)).to(torch.float16),
+                ),
             },
         },
         ("test_cmp_scalar_int64", "test_cmp_scalar_int64_cpu"): {
@@ -6074,14 +6087,21 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         self.compare_with_cpu(op, x, scalar, run_eager=True, run_compile=False)
 
     def test_le_dtypes_cpu(self, op, x, y):
-        # Covers int32×int32, fp32×fp32, and int32×fp32 inputs for torch.le.
-        # The Spyre lowering uses INT_TO_FLOAT promotion: int32 operands are
-        # cast to fp32, the native le op runs in fp32, and the result is
-        # float32 (1.0/0.0).  Wrap the CPU reference to also return float32.
-        def fp32_le(a, b):
-            return op(a, b).to(torch.float32)
+        # Covers int32×int32, fp32×fp32, int32×fp32, and fp16×fp16 inputs.
+        # Spyre's le lowering uses INT_TO_FLOAT promotion: integer operands
+        # are cast to the computation dtype before the native op runs, and
+        # the result carries that same dtype (fp32 or fp16) rather than bool.
+        # Derive the expected output dtype the same way the lowering does so
+        # the CPU reference always matches what Spyre produces.
+        from torch._prims_common import elementwise_dtypes, ELEMENTWISE_TYPE_PROMOTION_KIND
+        _, result_dtype = elementwise_dtypes(
+            x, y, type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT
+        )
 
-        self.compare_with_cpu(fp32_le, x, y, run_eager=True)
+        def promoted_le(a, b):
+            return op(a, b).to(result_dtype)
+
+        self.compare_with_cpu(promoted_le, x, y, run_eager=True)
 
     def test_linear_fn(self, x, weight, bias):
         # NOTE: relaxing atol from 2e-1 to 3e-1 for multi-dim work division, single element fails without
