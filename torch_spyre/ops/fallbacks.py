@@ -240,8 +240,6 @@ register_fallback_default(
         aten.cumsum,
         aten.repeat.out,
         aten.arange,
-        aten.sin,
-        aten.cos,
         aten.ne.Scalar_out,
         aten.isin,
         aten.tril,
