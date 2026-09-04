@@ -12,11 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Feasibility test: Taylor series approximation for cos and sin on Spyre.
+"""Tests for the Spyre cos / sin decompositions.
 
-cos and sin are CPU-offloaded fallback ops (torch_spyre/ops/fallbacks.py).
-This file investigates whether a pure-arithmetic Taylor series with range
-reduction can replace them on-device with no backend changes.
+``aten.cos`` and ``aten.sin`` used to be CPU-offloaded fallback ops. They are
+now decomposed on device by ``spyre_cos`` / ``spyre_sin`` in
+``torch_spyre/_inductor/decompositions.py``, built entirely from arithmetic
+primitives Spyre lowers natively (``floor``, ``mul``, ``add``, ``sub``).
+This file tests those two functions -- directly on CPU for the numerics, and
+through ``torch.cos`` / ``torch.sin`` under ``torch.compile`` for the
+registration and on-device path.
 
 All model YAML files (tests/resource/models/*.yaml, non-_spyre variants)
 show fp32 as the input dtype at the cos/sin call site:
@@ -32,12 +36,11 @@ show fp32 as the input dtype at the cos/sin call site:
   gpt-oss-20b (non-contiguous)   [1, 11, 32]        —
   gemma-4-26B-A4B-it             [1, 34, 256]       [1, 1, 256]
 
-Implementation
---------------
+Algorithm under test
+--------------------
 Step 1 — Cody-Waite two-term range reduction (ops: floor, mul, add, sub):
 
-    PI is split into two fp32-representable parts so that PI_HI + PI_LO == π
-    exactly in fp64:
+    PI is split into two parts so that PI_HI + PI_LO == π exactly in fp64:
         PI_HI = 3.1415927410125732   (nearest fp32 to π)
         PI_LO = -8.742278012618954e-8 (fp64 residual: π - PI_HI)
 
@@ -73,94 +76,52 @@ Note: fp32 itself can only represent values near 128000 with spacing ~0.008,
 which is larger than π; a linspace sweep at |x|_max=128000 is meaningless in
 fp32. The tests below are bounded to the largest real RoPE input (seq_len=1064,
 inv_freq[0]=1.0 → |x|_max=1063).
-
-Ops used: round, floor, mul, add, sub — all natively compiled on Spyre,
-none in the CPU fallback list.
 """
 
 import math
+import warnings
 
 import pytest
 import torch
 
+from torch_spyre._inductor.decompositions import (
+    get_spyre_decomp_table,
+    spyre_cos,
+    spyre_sin,
+)
+from torch_spyre.ops.fallbacks import FallbackWarning, fallback_ops
+
 # ---------------------------------------------------------------------------
-# Taylor series implementation
+# Section 0: registration -- cheap guard, no device needed
 # ---------------------------------------------------------------------------
 
-# Cody-Waite two-term decomposition of π.
-# PI_HI is the nearest fp32 to π; PI_LO is the fp64 residual.
-# In fp32 arithmetic: (x - k*PI_HI) - k*PI_LO gives x_r with error < 2e-12
-# for |x| up to ~128000 (vs ~3.5e-3 with a plain fp32 π constant).
-_PI_HI = 3.1415927410125732  # == float32(π), stored as Python float (fp64)
-_PI_LO = -8.742278012618954e-8  # == π - PI_HI  in fp64
 
+@pytest.mark.parametrize("op_name", ["cos", "sin"])
+def test_registered_as_decomposition_not_fallback(op_name):
+    """cos / sin must reach Inductor as a decomposition, never as a fallback.
 
-def _cos_reduced(x: torch.Tensor) -> torch.Tensor:
-    """cos(x) via degree-9 Taylor in Horner form. Valid for |x| <= π/2."""
-    x2 = x * x
-    return 1.0 + x2 * (
-        -0.5 + x2 * (1.0 / 24.0 + x2 * (-1.0 / 720.0 + x2 * (1.0 / 40320.0)))
+    Re-adding either op to ``register_fallback_default`` would silently put
+    the CPU round-trip back on every RoPE forward pass, so assert both halves.
+    """
+    op = getattr(torch.ops.aten, op_name).default
+    assert op in get_spyre_decomp_table(), (
+        f"{op} is missing from the Spyre decomposition table"
+    )
+    assert op not in fallback_ops, (
+        f"{op} is registered as a CPU fallback; it has a Spyre decomposition"
     )
 
 
-def _sin_reduced(x: torch.Tensor) -> torch.Tensor:
-    """sin(x) via degree-9 Taylor in Horner form. Valid for |x| <= π/2."""
-    x2 = x * x
-    return x * (
-        1.0
-        + x2
-        * (
-            -1.0 / 6.0
-            + x2 * (1.0 / 120.0 + x2 * (-1.0 / 5040.0 + x2 * (1.0 / 362880.0)))
-        )
-    )
-
-
-def taylor_cos(x: torch.Tensor) -> torch.Tensor:
-    """cos(x) approximation via Cody-Waite range reduction + degree-9 Taylor.
-
-    Uses only: floor, mul, add, sub — all natively compiled on Spyre.
-    torch.round is NOT used: it is not implemented in the Spyre codegen.
-    round-to-nearest is expressed as floor(x + 0.5) instead.
-    Input dtype must be fp32 (matches all RoPE call sites).
-
-    Worst-case absolute error vs torch.cos: ~5.3e-5 on RoPE-realistic inputs
-    (seq_len up to 1064, any supported head_dim).
-    """
-    k = torch.floor(x * (1.0 / math.pi) + 0.5)
-    x_r = (x - k * _PI_HI) - k * _PI_LO
-    k_mod2 = k - 2.0 * torch.floor(k * 0.5)
-    sign = 1.0 - 2.0 * k_mod2
-    return sign * _cos_reduced(x_r)
-
-
-def taylor_sin(x: torch.Tensor) -> torch.Tensor:
-    """sin(x) approximation via Cody-Waite range reduction + degree-9 Taylor.
-
-    Uses only: floor, mul, add, sub — all natively compiled on Spyre.
-    torch.round is NOT used: it is not implemented in the Spyre codegen.
-    round-to-nearest is expressed as floor(x + 0.5) instead.
-    Input dtype must be fp32 (matches all RoPE call sites).
-
-    Worst-case absolute error vs torch.sin: ~5.3e-5 on RoPE-realistic inputs
-    (seq_len up to 1064, any supported head_dim).
-    """
-    k = torch.floor(x * (1.0 / math.pi) + 0.5)
-    x_r = (x - k * _PI_HI) - k * _PI_LO
-    k_mod2 = k - 2.0 * torch.floor(k * 0.5)
-    sign = 1.0 - 2.0 * k_mod2
-    return sign * _sin_reduced(x_r)
-
-
 # ---------------------------------------------------------------------------
-# Section 1: CPU-only numerical accuracy tests (no device required)
+# Section 1: CPU-only numerical accuracy of the decomposition bodies
 # ---------------------------------------------------------------------------
 
 
 class TestTaylorAccuracyCpu:
-    """Validate Taylor approximation accuracy on CPU across a broad input range.
+    """Validate decomposition accuracy on CPU across a broad input range.
 
-    These tests do not require a Spyre device and can be run standalone.
+    ``spyre_cos`` / ``spyre_sin`` are plain functions over torch ops, so they
+    evaluate on CPU tensors unchanged. These tests need no Spyre device.
 
     The meaningful upper bound for fp32 tests is |x|_max ~ 1063 (the actual
     maximum RoPE embedding value for seq_len=1064, inv_freq[0]=1.0).  Values
@@ -173,14 +134,14 @@ class TestTaylorAccuracyCpu:
     def test_cos_fp32_accuracy(self, x_max):
         """Max fp32 error < 1e-4 across the swept range."""
         x = torch.linspace(-x_max, x_max, steps=10001, dtype=torch.float32)
-        max_err = (taylor_cos(x) - torch.cos(x)).abs().max().item()
+        max_err = (spyre_cos(x) - torch.cos(x)).abs().max().item()
         assert max_err < 1e-4, f"|x|_max={x_max}: max cos error {max_err:.3e} >= 1e-4"
 
     @pytest.mark.parametrize("x_max", [math.pi, 10.0, 100.0, 1000.0])
     def test_sin_fp32_accuracy(self, x_max):
         """Max fp32 error < 1e-4 across the swept range."""
         x = torch.linspace(-x_max, x_max, steps=10001, dtype=torch.float32)
-        max_err = (taylor_sin(x) - torch.sin(x)).abs().max().item()
+        max_err = (spyre_sin(x) - torch.sin(x)).abs().max().item()
         assert max_err < 1e-4, f"|x|_max={x_max}: max sin error {max_err:.3e} >= 1e-4"
 
     def test_boundary_values(self):
@@ -188,8 +149,8 @@ class TestTaylorAccuracyCpu:
         boundaries = torch.tensor(
             [k * math.pi for k in range(-4, 5)], dtype=torch.float32
         )
-        assert (taylor_cos(boundaries) - torch.cos(boundaries)).abs().max() < 1e-4
-        assert (taylor_sin(boundaries) - torch.sin(boundaries)).abs().max() < 1e-4
+        assert (spyre_cos(boundaries) - torch.cos(boundaries)).abs().max() < 1e-4
+        assert (spyre_sin(boundaries) - torch.sin(boundaries)).abs().max() < 1e-4
 
     def test_rope_realistic_inputs(self):
         """Inputs drawn from the actual RoPE frequency formula.
@@ -206,8 +167,8 @@ class TestTaylorAccuracyCpu:
                 pos_ids = torch.arange(seq_len, dtype=torch.float32).unsqueeze(1)
                 emb = torch.cat([pos_ids * inv_freq, pos_ids * inv_freq], dim=-1)
 
-                cos_err = (taylor_cos(emb) - torch.cos(emb)).abs().max().item()
-                sin_err = (taylor_sin(emb) - torch.sin(emb)).abs().max().item()
+                cos_err = (spyre_cos(emb) - torch.cos(emb)).abs().max().item()
+                sin_err = (spyre_sin(emb) - torch.sin(emb)).abs().max().item()
                 assert cos_err < 1e-4, (
                     f"head_dim={head_dim}, seq_len={seq_len}: cos error {cos_err:.3e}"
                 )
@@ -217,7 +178,7 @@ class TestTaylorAccuracyCpu:
 
 
 # ---------------------------------------------------------------------------
-# Section 2: Spyre compilation and correctness tests
+# Section 2: Spyre compilation and correctness, via torch.cos / torch.sin
 # ---------------------------------------------------------------------------
 
 # Shapes taken directly from the non-_spyre model YAML files.
@@ -236,35 +197,39 @@ _MODEL_SHAPES = [
 ]
 
 
-@pytest.mark.parametrize("shape", _MODEL_SHAPES)
-def test_taylor_cos_compiles_and_accurate(shape):
-    """taylor_cos compiles on Spyre without FallbackWarning and matches CPU."""
+def _compile_on_spyre(op, x):
+    """Compile ``op`` for Spyre and return the CPU-side result.
+
+    Turns FallbackWarning into an error: a CPU offload here would mean the
+    decomposition did not take effect, which is the whole point of the change.
+    """
 
     @torch.compile(dynamic=False)
-    def fn(x):
-        return taylor_cos(x)
+    def fn(t):
+        return op(t)
 
-    x = torch.randn(*shape, dtype=torch.float32)
-    ref = torch.cos(x)
-    out = fn(x.to("spyre")).cpu()
-    torch.testing.assert_close(out, ref, atol=1e-4, rtol=1e-4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FallbackWarning)
+        return fn(x.to("spyre")).cpu()
 
 
 @pytest.mark.parametrize("shape", _MODEL_SHAPES)
-def test_taylor_sin_compiles_and_accurate(shape):
-    """taylor_sin compiles on Spyre without FallbackWarning and matches CPU."""
-
-    @torch.compile(dynamic=False)
-    def fn(x):
-        return taylor_sin(x)
-
+def test_cos_compiles_and_accurate(shape):
+    """torch.cos compiles on Spyre without a fallback and matches CPU."""
     x = torch.randn(*shape, dtype=torch.float32)
-    ref = torch.sin(x)
-    out = fn(x.to("spyre")).cpu()
-    torch.testing.assert_close(out, ref, atol=1e-4, rtol=1e-4)
+    out = _compile_on_spyre(torch.cos, x)
+    torch.testing.assert_close(out, torch.cos(x), atol=1e-4, rtol=1e-4)
 
 
-def test_taylor_cos_sin_non_contiguous():
+@pytest.mark.parametrize("shape", _MODEL_SHAPES)
+def test_sin_compiles_and_accurate(shape):
+    """torch.sin compiles on Spyre without a fallback and matches CPU."""
+    x = torch.randn(*shape, dtype=torch.float32)
+    out = _compile_on_spyre(torch.sin, x)
+    torch.testing.assert_close(out, torch.sin(x), atol=1e-4, rtol=1e-4)
+
+
+def test_cos_sin_non_contiguous():
     """Non-contiguous input: gpt-oss-20b actual stride pattern [352, 1, 11].
 
     The logical shape is [1, 11, 32] with stride[1]=1 and stride[2]=11
@@ -278,9 +243,11 @@ def test_taylor_cos_sin_non_contiguous():
 
     @torch.compile(dynamic=False)
     def fn(t):
-        return taylor_cos(t), taylor_sin(t)
+        return torch.cos(t), torch.sin(t)
 
-    cos_out, sin_out = fn(x.to("spyre"))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FallbackWarning)
+        cos_out, sin_out = fn(x.to("spyre"))
     torch.testing.assert_close(cos_out.cpu(), torch.cos(x), atol=1e-4, rtol=1e-4)
     torch.testing.assert_close(sin_out.cpu(), torch.sin(x), atol=1e-4, rtol=1e-4)
 
@@ -298,12 +265,12 @@ def _rotate_half(x: torch.Tensor) -> torch.Tensor:
 
 
 def test_rope_end_to_end():
-    """Full RoPE pipeline on Spyre using Taylor cos/sin.
+    """Full RoPE pipeline on Spyre using the cos/sin decompositions.
 
     Mirrors the HuggingFace Transformers pattern:
         emb       = cat([inv_freq @ pos_ids, inv_freq @ pos_ids])  # fp32
-        cos_emb   = taylor_cos(emb)                                # fp32, STANDARD EA
-        sin_emb   = taylor_sin(emb)
+        cos_emb   = cos(emb)                                       # fp32, STANDARD EA
+        sin_emb   = sin(emb)
         q_embed   = q * cos_emb + rotate_half(q) * sin_emb
         k_embed   = k * cos_emb + rotate_half(k) * sin_emb
 
@@ -312,13 +279,14 @@ def test_rope_end_to_end():
     the same fp32 cos/sin would be cast to fp16 before the rotary multiply, but
     that cast produces a FP32_TO_DL16 (staggered) EA on Spyre which cannot be
     directly multiplied against STANDARD fp16 q/k unless the staggered operand
-    broadcasts on its stick dimension.  The feasibility question here is whether
-    the Taylor ops themselves compile and execute correctly on Spyre; the fp16
-    integration path in real models is a separate concern (the model compiles
-    today because the cast and rotary apply typically fall inside a single graph,
-    or cos/sin are pre-computed as STANDARD fp16 via a different lowering path).
+    broadcasts on its stick dimension.  What this test pins down is that the
+    decomposed ops compile and execute correctly on Spyre inside a real RoPE
+    graph; the fp16 integration path in real models is a separate concern (the
+    model compiles today because the cast and rotary apply typically fall inside
+    a single graph, or cos/sin are pre-computed as STANDARD fp16 via a different
+    lowering path).
 
-    EA note: fp32 Taylor output has STANDARD EA.  All q/k tensors are fp32
+    EA note: fp32 cos/sin output has STANDARD EA.  All q/k tensors are fp32
     STANDARD.  The cos_emb/sin_emb tensors are unsqueezed from [1, S, D] to
     [1, 1, S, D] so they broadcast over the H dimension in the rotary multiply;
     this is a size-1 broadcast on dim 1 which is EA-compatible.
@@ -326,10 +294,10 @@ def test_rope_end_to_end():
     B, H, S, D = 1, 8, 12, 128
 
     @torch.compile(dynamic=False)
-    def rope_taylor(q, k, emb):
-        """Taylor cos/sin + rotary multiply, all in fp32, all STANDARD EA."""
-        cos_emb = taylor_cos(emb).unsqueeze(1)  # [1, 1, S, D]
-        sin_emb = taylor_sin(emb).unsqueeze(1)
+    def rope_spyre(q, k, emb):
+        """cos/sin + rotary multiply, all in fp32, all STANDARD EA."""
+        cos_emb = torch.cos(emb).unsqueeze(1)  # [1, 1, S, D]
+        sin_emb = torch.sin(emb).unsqueeze(1)
         return (
             q * cos_emb + _rotate_half(q) * sin_emb,
             k * cos_emb + _rotate_half(k) * sin_emb,
@@ -355,7 +323,9 @@ def test_rope_end_to_end():
 
     q_ref, k_ref = rope_ref(q, k, emb)
 
-    q_out, k_out = rope_taylor(q.to("spyre"), k.to("spyre"), emb.to("spyre"))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FallbackWarning)
+        q_out, k_out = rope_spyre(q.to("spyre"), k.to("spyre"), emb.to("spyre"))
 
     torch.testing.assert_close(q_out.cpu(), q_ref, atol=1e-4, rtol=1e-4)
     torch.testing.assert_close(k_out.cpu(), k_ref, atol=1e-4, rtol=1e-4)
