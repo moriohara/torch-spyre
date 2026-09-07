@@ -1911,11 +1911,11 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 ),
             },
         },
-        # Exercises the Spyre-specific le lowering (INT_TO_FLOAT promotion):
-        #   int32 × int32  – both cast to fp32 by transform_args
-        #   fp32  × fp32   – no cast needed; result is fp32
+        # Exercises the Spyre-specific le lowering's operand promotion:
+        #   int32 × int32  – both operands cast to fp32 (no integer compare in HW)
+        #   fp32  × fp32   – no cast needed
         #   int32 × fp32   – int32 side cast to fp32; mixed-dtype comparison
-        # All three variants return float32 on Spyre (1.0 / 0.0).
+        # Every variant returns torch.bool, as aten.le does.
         ("test_le_dtypes", "test_le_dtypes_cpu"): {
             "ops_dict": {
                 "le": torch.le,
@@ -1960,7 +1960,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     torch.randint(-10, 10, (64, 128), dtype=torch.int32),
                     torch.ceil(cached_randn((128,), abs=True, scale=9.9, dtype=torch.float32)),
                 ),
-                # --- bool × bool: no fp cast; result is torch.bool ---
+                # --- bool × bool: no fp cast needed ---
                 "bool_1d": (
                     torch.randint(0, 2, (256,), dtype=torch.bool),
                     torch.randint(0, 2, (256,), dtype=torch.bool),
@@ -1973,7 +1973,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     torch.randint(0, 2, (64, 128), dtype=torch.bool),
                     torch.randint(0, 2, (128,), dtype=torch.bool),
                 ),
-                # --- fp16 × fp16: result is float16 on Spyre (SEN169_FP16 bool) ---
+                # --- fp16 × fp16: no cast needed ---
                 "fp16_1d": (
                     torch.ceil(cached_randn((256,), abs=True, scale=10.0)).to(torch.float16),
                     torch.ceil(cached_randn((256,), abs=True, scale=9.9)).to(torch.float16),
@@ -6159,21 +6159,11 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
 
     def test_le_dtypes_cpu(self, op, x, y):
         # Covers bool×bool, int32×int32, fp32×fp32, int32×fp32, fp16×fp16.
-        # The Spyre lowering dispatches on input dtype:
-        #   bool × bool  → ALWAYS_BOOL  (result: torch.bool)
-        #   otherwise    → INT_TO_FLOAT (result: fp32 or fp16)
-        # Derive result_dtype the same way so the CPU reference matches.
-        from torch._prims_common import elementwise_dtypes, ELEMENTWISE_TYPE_PROMOTION_KIND
-        if x.dtype == torch.bool and y.dtype == torch.bool:
-            kind = ELEMENTWISE_TYPE_PROMOTION_KIND.ALWAYS_BOOL
-        else:
-            kind = ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT
-        _, result_dtype = elementwise_dtypes(x, y, type_promotion_kind=kind)
-
-        def promoted_le(a, b):
-            return op(a, b).to(result_dtype)
-
-        self.compare_with_cpu(promoted_le, x, y, run_eager=True)
+        # The lowering casts integer *operands* to float, but the result dtype is
+        # torch.bool for every input combination, so the CPU reference is plain
+        # torch.le -- deriving a promoted result_dtype and casting the reference
+        # to it would only re-state whatever the lowering happened to return.
+        self.compare_with_cpu(op, x, y, run_eager=True)
 
     def test_le_semantics_base(self, op, x, y):
         """torch.le must return torch.bool, checked against an uncoerced CPU ref.
