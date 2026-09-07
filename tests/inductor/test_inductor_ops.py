@@ -1936,29 +1936,55 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 ),
                 # --- fp32 × fp32 ---
                 "fp32_1d": (
-                    torch.ceil(cached_randn((256,), abs=True, scale=10.0, dtype=torch.float32)),
-                    torch.ceil(cached_randn((256,), abs=True, scale=9.9, dtype=torch.float32)),
+                    torch.ceil(
+                        cached_randn((256,), abs=True, scale=10.0, dtype=torch.float32)
+                    ),
+                    torch.ceil(
+                        cached_randn((256,), abs=True, scale=9.9, dtype=torch.float32)
+                    ),
                 ),
                 "fp32_2d": (
-                    torch.ceil(cached_randn((64, 128), abs=True, scale=10.0, dtype=torch.float32)),
-                    torch.ceil(cached_randn((64, 128), abs=True, scale=9.9, dtype=torch.float32)),
+                    torch.ceil(
+                        cached_randn(
+                            (64, 128), abs=True, scale=10.0, dtype=torch.float32
+                        )
+                    ),
+                    torch.ceil(
+                        cached_randn(
+                            (64, 128), abs=True, scale=9.9, dtype=torch.float32
+                        )
+                    ),
                 ),
                 "fp32_broadcast": (
-                    torch.ceil(cached_randn((64, 128), abs=True, scale=10.0, dtype=torch.float32)),
-                    torch.ceil(cached_randn((128,), abs=True, scale=9.9, dtype=torch.float32)),
+                    torch.ceil(
+                        cached_randn(
+                            (64, 128), abs=True, scale=10.0, dtype=torch.float32
+                        )
+                    ),
+                    torch.ceil(
+                        cached_randn((128,), abs=True, scale=9.9, dtype=torch.float32)
+                    ),
                 ),
                 # --- int32 × fp32 (mixed): int32 side is promoted to fp32 ---
                 "int32_fp32_1d": (
                     torch.randint(-10, 10, (256,), dtype=torch.int32),
-                    torch.ceil(cached_randn((256,), abs=True, scale=9.9, dtype=torch.float32)),
+                    torch.ceil(
+                        cached_randn((256,), abs=True, scale=9.9, dtype=torch.float32)
+                    ),
                 ),
                 "int32_fp32_2d": (
                     torch.randint(-10, 10, (64, 128), dtype=torch.int32),
-                    torch.ceil(cached_randn((64, 128), abs=True, scale=9.9, dtype=torch.float32)),
+                    torch.ceil(
+                        cached_randn(
+                            (64, 128), abs=True, scale=9.9, dtype=torch.float32
+                        )
+                    ),
                 ),
                 "int32_fp32_broadcast": (
                     torch.randint(-10, 10, (64, 128), dtype=torch.int32),
-                    torch.ceil(cached_randn((128,), abs=True, scale=9.9, dtype=torch.float32)),
+                    torch.ceil(
+                        cached_randn((128,), abs=True, scale=9.9, dtype=torch.float32)
+                    ),
                 ),
                 # --- bool × bool: no fp cast needed ---
                 "bool_1d": (
@@ -1975,16 +2001,28 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 ),
                 # --- fp16 × fp16: no cast needed ---
                 "fp16_1d": (
-                    torch.ceil(cached_randn((256,), abs=True, scale=10.0)).to(torch.float16),
-                    torch.ceil(cached_randn((256,), abs=True, scale=9.9)).to(torch.float16),
+                    torch.ceil(cached_randn((256,), abs=True, scale=10.0)).to(
+                        torch.float16
+                    ),
+                    torch.ceil(cached_randn((256,), abs=True, scale=9.9)).to(
+                        torch.float16
+                    ),
                 ),
                 "fp16_2d": (
-                    torch.ceil(cached_randn((64, 128), abs=True, scale=10.0)).to(torch.float16),
-                    torch.ceil(cached_randn((64, 128), abs=True, scale=9.9)).to(torch.float16),
+                    torch.ceil(cached_randn((64, 128), abs=True, scale=10.0)).to(
+                        torch.float16
+                    ),
+                    torch.ceil(cached_randn((64, 128), abs=True, scale=9.9)).to(
+                        torch.float16
+                    ),
                 ),
                 "fp16_broadcast": (
-                    torch.ceil(cached_randn((64, 128), abs=True, scale=10.0)).to(torch.float16),
-                    torch.ceil(cached_randn((128,), abs=True, scale=9.9)).to(torch.float16),
+                    torch.ceil(cached_randn((64, 128), abs=True, scale=10.0)).to(
+                        torch.float16
+                    ),
+                    torch.ceil(cached_randn((128,), abs=True, scale=9.9)).to(
+                        torch.float16
+                    ),
                 ),
             },
         },
