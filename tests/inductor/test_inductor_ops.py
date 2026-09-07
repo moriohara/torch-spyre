@@ -1988,6 +1988,64 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 ),
             },
         },
+        # torch.le routed through _compare_op_with_cpu, which unconditionally
+        # sets cpu_compile=True. Unlike test_le_dtypes above, the CPU reference
+        # is plain torch.le -- its result is NOT cast to the lowering's promoted
+        # dtype -- so these cases assert real torch semantics: torch.le returns
+        # torch.bool. See test_le_semantics_base for what each case exposes.
+        #
+        # Sizes are >= 1024 elements on purpose: the cpp backend's dtype
+        # assertion only fires on a vectorized CppCSEVariable, so a 64-element
+        # tensor takes the scalar tail path and passes.
+        ("test_le_semantics", "test_le_semantics_base"): {
+            "ops_dict": {
+                "le": torch.le,
+            },
+            "param_sets": {
+                "fp16_1d1024": (
+                    cached_randn((1024,), dtype=torch.float16),
+                    cached_randn((1024,), dtype=torch.float16),
+                ),
+                "fp32_1d1024": (
+                    cached_randn((1024,), dtype=torch.float32),
+                    cached_randn((1024,), dtype=torch.float32),
+                ),
+                "int32_1d1024": (
+                    torch.randint(-10, 10, (1024,), dtype=torch.int32),
+                    torch.randint(-10, 10, (1024,), dtype=torch.int32),
+                ),
+            },
+        },
+        ("test_le_mask_consumed", "test_le_mask_consumed_base"): {
+            "ops_dict": {
+                "le": torch.le,
+            },
+            "param_sets": {
+                "fp16_1d1024": (
+                    cached_randn((1024,), dtype=torch.float16),
+                    cached_randn((1024,), dtype=torch.float16),
+                ),
+                "fp16_2d16x1024": (
+                    cached_randn((16, 1024), dtype=torch.float16),
+                    cached_randn((16, 1024), dtype=torch.float16),
+                ),
+            },
+        },
+        ("test_le_scalar_overload", "test_le_scalar_overload_base"): {
+            "ops_dict": {
+                "le": torch.le,
+            },
+            "param_sets": {
+                "fp16_1d1024_float_scalar": (
+                    cached_randn((1024,), dtype=torch.float16),
+                    0.5,
+                ),
+                "fp16_1d1024_int_scalar": (
+                    cached_randn((1024,), dtype=torch.float16),
+                    1,
+                ),
+            },
+        },
         ("test_cmp_scalar_int64", "test_cmp_scalar_int64_cpu"): {
             "ops_dict": {
                 "ne": torch.ne,
@@ -6116,6 +6174,74 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             return op(a, b).to(result_dtype)
 
         self.compare_with_cpu(promoted_le, x, y, run_eager=True)
+
+    def test_le_semantics_base(self, op, x, y):
+        """torch.le must return torch.bool, checked against an uncoerced CPU ref.
+
+        On main, Spyre `le` returns torch.bool for every input dtype -- bool is
+        stored in an fp16/fp32 *physical* format on device (see
+        _BOOL_EQUIVALENT_DTYPES / bool_layout_dtype in _inductor/dtype_ops.py),
+        but the *logical* dtype stays bool. lower_le drops that, so this fails:
+
+            compiled spyre <-> cpu mismatch
+            The values for attribute 'dtype' do not match:
+                torch.float16 != torch.bool.
+        """
+
+        def fn(a, b):
+            return op(a, b)
+
+        _compare_op_with_cpu(fn, None, x, y)
+
+    def test_le_mask_consumed_base(self, op, x, y):
+        """torch.le whose result is consumed as a predicate inside the kernel.
+
+        Two independent failures, in the order they surface:
+
+        1. The compiled-CPU reference (computed first, utils_inductor.py:689)
+           dies in codegen. register_spyre_lowering forwards name="le" and
+           type_promotion_kind=None to Inductor's *process-global*
+           op_dtype_propagation_rules, and since override_return_dtype is not
+           passed, torch's own rule is overwritten::
+
+               OpDtypeRule(DEFAULT, torch.bool) -> OpDtypeRule(None, None)
+
+           `le` is then codegen'd as the promoted operand dtype instead of bool::
+
+               InductorError: AssertionError: CppCSEVariable(name: tmp4,
+                   is_vec: True, dtype: torch.float32, ...)
+
+           Note this rule is global and never restored, unlike the lowering
+           overlay that enable_spyre_lowerings() saves and restores -- so the
+           damage lands on plain cpp/triton compiles that never touch Spyre.
+
+        2. The Spyre leg cannot even trace, because an fp16 `le` result is not a
+           legal `where` predicate::
+
+               RuntimeError: expected predicate to be bool, got torch.float16
+
+           This graph passes on main.
+        """
+
+        def fn(a, b):
+            return torch.where(op(a, b), a, -a)
+
+        _compare_op_with_cpu(fn, None, x, y)
+
+    def test_le_scalar_overload_base(self, op, x, scalar):
+        """lower_le registers aten.le.Scalar but cannot lower it.
+
+        type_promotion_kind=None stops Inductor wrapping a Python scalar into a
+        TensorBox, and lower_le hands it straight to lowering.to_dtype::
+
+            LoweringException: AttributeError:
+                'float' object has no attribute 'get_dtype'
+        """
+
+        def fn(a, scalar_val):
+            return op(a, scalar_val)
+
+        _compare_op_with_cpu(fn, None, x, scalar)
 
     def test_linear_fn(self, x, weight, bias):
         # NOTE: relaxing atol from 2e-1 to 3e-1 for multi-dim work division, single element fails without
