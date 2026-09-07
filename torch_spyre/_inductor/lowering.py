@@ -325,6 +325,43 @@ def _ensure_synthetic_origin(result, target, args: tuple) -> None:
     buf.origins = OrderedSet([fx_node])
 
 
+# aten.le: override the upstream ALWAYS_BOOL + override_return_dtype=torch.bool
+# lowering with dtype-aware dispatch:
+#
+#   bool × bool  → ALWAYS_BOOL: no cast; hardware compares the fp16-physical
+#                  bool values and returns torch.bool (fp16-width on device).
+#
+#   otherwise    → INT_TO_FLOAT: int32 (and any other integer/bool mix) inputs
+#                  are cast to the common float dtype before the native op runs;
+#                  result is fp32 or fp16.
+#
+# type_promotion_kind=None skips transform_args' automatic pre-cast so lower_le
+# can inspect the original input dtypes and choose the right promotion path.
+@register_spyre_lowering(
+    [torch.ops.aten.le.Tensor, torch.ops.aten.le.Scalar],
+    name="le",
+    broadcast=True,
+    type_promotion_kind=None,
+)
+def lower_le(a, b):
+    from torch._prims_common import elementwise_dtypes, ELEMENTWISE_TYPE_PROMOTION_KIND
+    a_dtype = a.get_dtype() if hasattr(a, "get_dtype") else torch.tensor(a).dtype
+    b_dtype = b.get_dtype() if hasattr(b, "get_dtype") else torch.tensor(b).dtype
+    if a_dtype == torch.bool and b_dtype == torch.bool:
+        # bool × bool: preserve bool semantics, no fp cast needed
+        kind = ELEMENTWISE_TYPE_PROMOTION_KIND.ALWAYS_BOOL
+    else:
+        # int32, fp32, fp16, or mixed: promote to the common float dtype
+        kind = ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT
+    _, result_dtype = elementwise_dtypes(
+        torch.empty(0, dtype=a_dtype), torch.empty(0, dtype=b_dtype),
+        type_promotion_kind=kind,
+    )
+    a = lowering.to_dtype(a, result_dtype)
+    b = lowering.to_dtype(b, result_dtype)
+    return lowering.make_pointwise(lowering.ops_wrapper("le"))(a, b)
+
+
 @register_spyre_lowering(torch.ops.spyre.scaled_mm.default)
 def lower_scaled_mm(
     mat1,

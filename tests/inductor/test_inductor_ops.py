@@ -1996,6 +1996,83 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 ),
             },
         },
+        # Exercises the Spyre-specific le lowering (INT_TO_FLOAT promotion):
+        #   int32 × int32  – both cast to fp32 by transform_args
+        #   fp32  × fp32   – no cast needed; result is fp32
+        #   int32 × fp32   – int32 side cast to fp32; mixed-dtype comparison
+        # All three variants return float32 on Spyre (1.0 / 0.0).
+        ("test_le_dtypes", "test_le_dtypes_cpu"): {
+            "ops_dict": {
+                "le": torch.le,
+            },
+            "param_sets": {
+                # --- int32 × int32 ---
+                "int32_1d": (
+                    torch.randint(-10, 10, (256,), dtype=torch.int32),
+                    torch.randint(-10, 10, (256,), dtype=torch.int32),
+                ),
+                "int32_2d": (
+                    torch.randint(-10, 10, (64, 128), dtype=torch.int32),
+                    torch.randint(-10, 10, (64, 128), dtype=torch.int32),
+                ),
+                "int32_broadcast": (
+                    torch.randint(-10, 10, (64, 128), dtype=torch.int32),
+                    torch.randint(-10, 10, (128,), dtype=torch.int32),
+                ),
+                # --- fp32 × fp32 ---
+                "fp32_1d": (
+                    torch.ceil(cached_randn((256,), abs=True, scale=10.0, dtype=torch.float32)),
+                    torch.ceil(cached_randn((256,), abs=True, scale=9.9, dtype=torch.float32)),
+                ),
+                "fp32_2d": (
+                    torch.ceil(cached_randn((64, 128), abs=True, scale=10.0, dtype=torch.float32)),
+                    torch.ceil(cached_randn((64, 128), abs=True, scale=9.9, dtype=torch.float32)),
+                ),
+                "fp32_broadcast": (
+                    torch.ceil(cached_randn((64, 128), abs=True, scale=10.0, dtype=torch.float32)),
+                    torch.ceil(cached_randn((128,), abs=True, scale=9.9, dtype=torch.float32)),
+                ),
+                # --- int32 × fp32 (mixed): int32 side is promoted to fp32 ---
+                "int32_fp32_1d": (
+                    torch.randint(-10, 10, (256,), dtype=torch.int32),
+                    torch.ceil(cached_randn((256,), abs=True, scale=9.9, dtype=torch.float32)),
+                ),
+                "int32_fp32_2d": (
+                    torch.randint(-10, 10, (64, 128), dtype=torch.int32),
+                    torch.ceil(cached_randn((64, 128), abs=True, scale=9.9, dtype=torch.float32)),
+                ),
+                "int32_fp32_broadcast": (
+                    torch.randint(-10, 10, (64, 128), dtype=torch.int32),
+                    torch.ceil(cached_randn((128,), abs=True, scale=9.9, dtype=torch.float32)),
+                ),
+                # --- bool × bool: no fp cast; result is torch.bool ---
+                "bool_1d": (
+                    torch.randint(0, 2, (256,), dtype=torch.bool),
+                    torch.randint(0, 2, (256,), dtype=torch.bool),
+                ),
+                "bool_2d": (
+                    torch.randint(0, 2, (64, 128), dtype=torch.bool),
+                    torch.randint(0, 2, (64, 128), dtype=torch.bool),
+                ),
+                "bool_broadcast": (
+                    torch.randint(0, 2, (64, 128), dtype=torch.bool),
+                    torch.randint(0, 2, (128,), dtype=torch.bool),
+                ),
+                # --- fp16 × fp16: result is float16 on Spyre (SEN169_FP16 bool) ---
+                "fp16_1d": (
+                    torch.ceil(cached_randn((256,), abs=True, scale=10.0)).to(torch.float16),
+                    torch.ceil(cached_randn((256,), abs=True, scale=9.9)).to(torch.float16),
+                ),
+                "fp16_2d": (
+                    torch.ceil(cached_randn((64, 128), abs=True, scale=10.0)).to(torch.float16),
+                    torch.ceil(cached_randn((64, 128), abs=True, scale=9.9)).to(torch.float16),
+                ),
+                "fp16_broadcast": (
+                    torch.ceil(cached_randn((64, 128), abs=True, scale=10.0)).to(torch.float16),
+                    torch.ceil(cached_randn((128,), abs=True, scale=9.9)).to(torch.float16),
+                ),
+            },
+        },
         ("test_cmp_scalar_int64", "test_cmp_scalar_int64_cpu"): {
             "ops_dict": {
                 "ne": torch.ne,
@@ -6119,6 +6196,24 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
     def test_cmp_scalar_int64_cpu(self, op, x, scalar):
         # Test comparison ops with int64 tensors and scalar values.
         self.compare_with_cpu(op, x, scalar, run_eager=True, run_compile=False)
+
+    def test_le_dtypes_cpu(self, op, x, y):
+        # Covers bool×bool, int32×int32, fp32×fp32, int32×fp32, fp16×fp16.
+        # The Spyre lowering dispatches on input dtype:
+        #   bool × bool  → ALWAYS_BOOL  (result: torch.bool)
+        #   otherwise    → INT_TO_FLOAT (result: fp32 or fp16)
+        # Derive result_dtype the same way so the CPU reference matches.
+        from torch._prims_common import elementwise_dtypes, ELEMENTWISE_TYPE_PROMOTION_KIND
+        if x.dtype == torch.bool and y.dtype == torch.bool:
+            kind = ELEMENTWISE_TYPE_PROMOTION_KIND.ALWAYS_BOOL
+        else:
+            kind = ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT
+        _, result_dtype = elementwise_dtypes(x, y, type_promotion_kind=kind)
+
+        def promoted_le(a, b):
+            return op(a, b).to(result_dtype)
+
+        self.compare_with_cpu(promoted_le, x, y, run_eager=True)
 
     def test_linear_fn(self, x, weight, bias):
         # NOTE: relaxing atol from 2e-1 to 3e-1 for multi-dim work division, single element fails without
