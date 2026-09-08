@@ -635,6 +635,27 @@ def spyre__copy_from(self, dst, non_blocking=False):
     ):
         return dst
 
+    # TODO(issue): D2H ignores the source's ElementArrangement and returns
+    # PERMUTED data, silently.
+    #
+    # A stick-reordering typecast (dl16tofp32 / fp32todl16, see
+    # _STICK_REORDERING_OPS in _inductor/dtype_ops.py) leaves its result with a
+    # staggered EA: the elements are correct but sit in non-sequential device
+    # coordinates. That is a legitimate on-device value -- the EA is stamped on
+    # the live tensor and a FOLLOWING compiled graph consumes it correctly,
+    # including a reduction over the staggered dim, and the reverse conversion
+    # restores STANDARD. But `copy_tensor` below reads the buffer as if it were
+    # STANDARD, so the host gets a permutation of the right answer with no error
+    # raised. Reachable from plain `add`/`mul` on an fp16 x fp32 pair with a
+    # stick-dim broadcaster, and from a bare `x.float()` returned directly --
+    # which is why device numerics must be checked as `.cpu().float()` and never
+    # `.float().cpu()`.
+    #
+    # Fix here, not in a lowering or a compile pass: restickify (or apply the
+    # reverse conversion) when `self.device_tensor_layout().element_arrangement`
+    # is not STANDARD. The information is already available at this point. Note a
+    # compile-time gate on graph outputs is NOT a valid substitute -- it would
+    # reject the working cross-graph cases above.
     if (self.device.type == "cpu" and dst.device.type == "spyre") or (
         self.device.type == "spyre" and dst.device.type == "cpu"
     ):
