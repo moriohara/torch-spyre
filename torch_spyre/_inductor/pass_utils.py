@@ -141,46 +141,213 @@ def rescale_stl_for_dtype(
     stl: SpyreTensorLayout,
     out_dtype: torch.dtype,
     ea: ElementArrangement,
+    *,
+    stick_extent: int | None = None,
+    host_size: "list[Expr] | list[int] | None" = None,
 ) -> SpyreTensorLayout:
     """Propagate a device layout across a same-shape, differing-stick-depth dtype conversion.
 
     Copies the input STL's ``device_size``/``stride_map`` and rescales the stick
-    depth (the last device dim) plus, when present, the one non-stick dim whose
-    stride equals the input stick depth. This preserves any non-canonical layout
-    or padding present in the input STL instead of reconstructing a dense layout
-    from the logical size/stride.
+    depth (the last device dim) plus, when present, the one non-stick dim that
+    indexes whole sticks -- the dim whose stride is ``stride_map[-1] * in_eps``.
+    This preserves any non-canonical layout or padding present in the input STL
+    instead of reconstructing a dense layout from the logical size/stride.
 
     The input elements-per-stick is read from ``stl.device_size[-1]`` (the stick
     dimension is always full, so it equals ``get_elem_in_stick(in_dtype)``); the
     output count comes from ``out_dtype``.
 
+    The number of sticks must be derived from the *logical* extent of the stick
+    axis, the way the canonical constructor does it
+    (``ceil(host_size[stick_dim] / elems_in_stick)``, ``spyre_tensor_impl.cpp``).
+    The input ``device_size`` records only the padded stick *capacity*, which is a
+    lossy encoding of that extent: at fp16 every extent in ``1..64`` is one stick,
+    yet those extents need one or two fp32 sticks. Rescaling capacity is therefore
+    exact only when the stick grows (``out_eps % in_eps == 0``) and is wrong for a
+    fixed fraction of extents when it shrinks. Pass ``stick_extent`` whenever the
+    caller knows it; see issue #4392.
+
     Args:
         stl: Input device layout to rescale.
         out_dtype: Torch dtype of the conversion output.
         ea: ElementArrangement to stamp on the returned layout.
+        stick_extent: Logical extent of the host dim that the num-sticks device
+            dim counts over. When given it both identifies that dim unambiguously
+            and yields the exact stick count. Callers with an Inductor dep should
+            resolve it via ``stick_extent_from_coords``.
+        host_size: Full logical shape, for callers that cannot resolve the stick
+            axis themselves (the eager ``.to()`` path has no ``MemoryDep`` to run
+            coordinate identity against). Each extent is tried in turn and kept
+            only if it uniquely identifies a num-sticks dim, so a non-canonical
+            ``dim_order`` resolves to the right axis rather than assuming the last
+            host dim. Extents that disagree are all rejected. Ignored when
+            ``stick_extent`` is given.
+
+    When no extent is available at all, a clamped capacity-based estimate is used:
+    it may over-count on a narrowing conversion but is never zero, so the
+    downstream division-by-zero cannot recur. When an extent *is* available but
+    disproves every candidate, the stick count is left untouched rather than
+    estimated -- see the inline comment.
+
+    Scope: this helper is exact or inert, never wrong. Measured over a 1944-case
+    sweep (extents 1..192 x rank 1-3 x every stride permutation x every
+    ``dim_order`` x both fp16<->fp32 directions), comparing both ``device_size``
+    and ``stride_map`` against the layout the canonical constructor builds:
+
+    ::
+
+        variant                        size wrong  stride wrong  zero dims
+        unfixed                               916          1210        262
+        this helper, host_size                 56            18          0
+        this helper, stick_extent               0             0          0
+
+    With an authoritative ``stick_extent`` -- which every compile-path caller has,
+    via ``stick_extent_from_coords`` -- the result is exact for every case in the
+    sweep. It never wrote an incorrect count while claiming to have validated one,
+    and never produced a zero-sized dim.
+
+    The residue on the ``host_size`` path is a single class: two host extents are
+    both consistent with the input's stick count yet imply *different* output
+    counts, so no amount of layout inspection can break the tie. Host ``(4,63)``
+    fp16 is one stick and both extents (4 and 63) give ``in_sticks == 1``, but they
+    imply 1 and 2 fp32 sticks respectively. Resolving it needs to know *which* host
+    dim is the stick axis, i.e. the ``dim_map`` the layout discards at construction
+    (consumed at ``spyre_tensor_impl.cpp:170``) or the host strides threaded in --
+    the latter being how coarse tiling handled the same gap, see ``_stick_host_dim``
+    in ``wsr/coarse_tile.py``. Both are larger changes than this fix; these layouts
+    keep the input's stick count, as today, and are out of scope here.
     """
     in_eps = stl.device_size[-1]
     out_eps = get_elem_in_stick(out_dtype)
     out_device_size = list(stl.device_size)
     out_stride_map = list(stl.stride_map)
     out_device_size[-1] = out_eps
-    # Rescale the first non-stick dim that indexes whole sticks (stride == the
-    # input stick depth) by the stick-depth ratio. A staggered/sparse layout
+    # Rescale the non-stick dim that indexes whole sticks (see the stride
+    # predicate below) by the stick-depth ratio. A staggered/sparse layout
     # (e.g. the DL16_TO_FP32 restoration operand, whose stride_map carries
     # sentinel -1 entries rather than a linear num-sticks stride) has no such
     # dim; there only the stick depth changes, so a no-match is expected and
     # left as-is.
-    for i, s in enumerate(stl.stride_map):
-        if s == in_eps:
-            out_device_size[i] = stl.device_size[i] * in_eps // out_eps
-            out_stride_map[i] = out_eps
-            break
+    # The stride predicate alone is ambiguous at rank >= 3 (a (2,4,8,64)
+    # fp16 layout has stride_map [512, 64, 64, 2048, 1], matching dims 1 and 2).
+    # When the extent is known, validate a candidate by requiring it to hold the
+    # input's own stick count -- the same idiom ``ir.py`` uses to identify a stick
+    # dim. Writing the count into the wrong dim permutes the tensor.
+    # The last device dim is the stick itself, already rescaled to out_eps above;
+    # it counts elements, never sticks, so it is never a num-sticks candidate even
+    # when its stride happens to equal in_eps (host (4,32) fp32 with dim_order
+    # [1,0] gives stride_map [1024, 1, 32] == in_eps at the last dim). Selecting it
+    # would overwrite the stick depth with a stick count.
+    last = len(out_device_size) - 1
+    # The num-sticks dim's stride is ``host_stride[stick_dim] * elems_in_stick``.
+    # ``in_eps`` is only the host-contiguous (``host_stride[stick_dim] == 1``) case
+    # of that. The general factor is already on the layout as ``stride_map[-1]``,
+    # the inner-stick stride, so no host strides need threading in: host ``(68,4)``
+    # with ``dim_order [1,0]`` gives fp16 ``stride_map [256, 1, 4]``, whose
+    # num-sticks stride is ``4 * 64 == 256`` and matches no bare ``== in_eps``
+    # candidate. This reduces to ``== in_eps`` exactly when ``stride_map[-1] == 1``,
+    # so it is a strict generalization. A staggered/sparse layout (the
+    # DL16_TO_FP32 restoration operand) carries sentinel ``-1`` entries and has no
+    # meaningful inner stride; there fall back to the plain stick depth so those
+    # layouts behave exactly as before.
+    inner = stl.stride_map[-1]
+    stride_in = inner * in_eps if inner > 0 else in_eps
+    stride_out = inner * out_eps if inner > 0 else out_eps
+    candidates = [
+        i for i, s in enumerate(stl.stride_map) if s == stride_in and i != last
+    ]
+    num_sticks = None
+    # Candidate extents: an explicit stick_extent when the caller resolved the
+    # stick axis authoritatively (stick_extent_from_coords), otherwise every host
+    # extent, letting the validation below pick the axis.
+    if stick_extent is not None:
+        extents = [stick_extent]
+    elif host_size is not None:
+        extents = [concretize_expr(s) for s in host_size]
+    else:
+        extents = []
+    # Every (extent, dim) pair whose stick count matches the input layout. With an
+    # authoritative stick_extent there is at most one extent to try, so a single
+    # match settles it. With a bare host_size several extents can match the same
+    # dim while implying *different* output counts -- host (4,63) with dim_order
+    # [1,0] is one fp16 stick, and both extents (4 and 63) yield in_sticks == 1,
+    # but 1 and 2 fp32 sticks respectively. Accepting the first match would pick
+    # by iteration order, so require the surviving matches to agree.
+    matches = set()
+    for extent in extents:
+        in_sticks = -(-extent // in_eps)  # ceil
+        exact = [i for i in candidates if stl.device_size[i] == in_sticks]
+        if len(exact) == 1:
+            matches.add((exact[0], -(-extent // out_eps)))  # ceil
+    if len(matches) == 1:
+        i, num_sticks = matches.pop()
+        out_device_size[i] = num_sticks
+        out_stride_map[i] = stride_out
+    elif extents:
+        # Either no candidate held the input's own stick count for any known
+        # extent -- so every candidate is *disproven* as the num-sticks dim, not
+        # merely unconfirmed -- or the extents disagree about the count. Writing a
+        # count we cannot pin, or writing one into a dim we ruled out, permutes the
+        # tensor; leave the *count* alone.
+        #
+        # The *stride* is a separate question. It is
+        # ``host_stride[stick_dim] * elems_in_stick`` and so does not depend on the
+        # count at all: whenever exactly one dim matches the stride predicate its
+        # stride can be rescaled even though its extent stayed ambiguous. That
+        # matters far more often than it sounds -- across the sweep below the
+        # num-sticks stride changes in 1888 of 1944 cases while the count changes in
+        # only 414, so coupling the two would leave a stale stride (and thus a
+        # layout that disagrees with the canonical one) in cases the unfixed code
+        # got right.
+        if len(candidates) == 1:
+            out_stride_map[candidates[0]] = stride_out
+    elif candidates:
+        # No extent available at all (legacy caller): keep the capacity-based
+        # estimate, clamped so it can never be zero (a zero-sized dim divides by
+        # zero downstream -- SIGFPE, see spyre_mem.cpp).
+        i = candidates[0]
+        capacity = stl.device_size[i] * in_eps
+        out_device_size[i] = max(1, -(-capacity // out_eps))  # ceil, never 0
+        out_stride_map[i] = stride_out
     return SpyreTensorLayout(
         out_device_size,
         out_stride_map,
         get_device_dtype(out_dtype),
         ea,
     )
+
+
+def stick_extent_from_coords(
+    stl: SpyreTensorLayout,
+    in_layout: FixedLayout,
+    dep: MemoryDep,
+    host_size: "list[Expr] | list[int]",
+) -> "int | None":
+    """Valid element count along ``stl``'s stick axis, recovered by coordinate identity.
+
+    ``SpyreTensorLayout`` retains only ``device_size``/``stride_map``/
+    ``device_dtype``/``element_arrangement``: it discards its ``dim_map`` (so the
+    host<->device dim identity is off the layout -- see ``_stick_host_dim``,
+    issue #3116) and records the stick dim's padded *capacity* rather than how
+    many of those elements are valid (issue #4392). Both are needed to rescale a
+    stick count across a dtype change, and both are recoverable from the owning
+    buffer instead of being tracked on the layout.
+
+    Recovers the stick host dim exactly as ``_stick_host_dim`` does -- the
+    inner-stick device coordinate has a single free symbol that also drives
+    exactly one host coordinate, so ``matching_dim`` resolves it even when two
+    host dims share a size -- then reads the extent off ``host_size``.
+
+    Returns ``None`` when the coordinates are unavailable or the identity is not
+    unique, leaving the caller on its documented fallback.
+    """
+    dev_coords = try_device_coordinates(stl, dep, None)
+    if not dev_coords:
+        return None
+    stick_hd = matching_dim(host_coordinates(in_layout, dep, None), dev_coords[-1])
+    if stick_hd is None:
+        return None
+    return concretize_expr(host_size[stick_hd])
 
 
 def op_read_writes(op: Operation) -> ReadWrites:

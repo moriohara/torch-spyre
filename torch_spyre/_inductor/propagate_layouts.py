@@ -94,6 +94,7 @@ from .pass_utils import (
     is_topk,
     iter_var_id,
     rescale_stl_for_dtype,
+    stick_extent_from_coords,
 )
 from .optimize_restickify import AllSameNode, AnyInNode, FixedInOutNode
 from .views import compute_coordinates, matching_dim
@@ -516,7 +517,20 @@ def _single_arg_op_layout(
             #    Rebuild a clean dense layout from the output host size instead,
             #    as the general (non-EA) convert path does.
             if fmt in STAGGERED_EAS or input_ea in STAGGERED_EAS:
-                layouts = [rescale_stl_for_dtype(stl, output.dtype, fmt)]
+                # The rescaled num-sticks count must come from the logical extent
+                # of the stick axis, not from the input's padded stick capacity
+                # (issue #4392). A None extent leaves the helper on its clamped
+                # capacity estimate.
+                layouts = [
+                    rescale_stl_for_dtype(
+                        stl,
+                        output.dtype,
+                        fmt,
+                        stick_extent=stick_extent_from_coords(
+                            stl, in_layout, dep, output.size
+                        ),
+                    )
+                ]
 
                 # A conversion that creates a staggered EA must also expose
                 # outputs reachable by restickifying its STANDARD input first.
@@ -528,7 +542,7 @@ def _single_arg_op_layout(
                 if fmt in STAGGERED_EAS and input_ea == ElementArrangement.STANDARD:
                     in_coords = host_coordinates(in_layout, dep, None)
                     source_device_coords = device_coordinates(stl, dep, None)
-                    for target_stick_expr in in_coords:
+                    for target_hd, target_stick_expr in enumerate(in_coords):
                         if not target_stick_expr.free_symbols:
                             continue
                         target_stl = compute_restickify_target_layout(
@@ -540,7 +554,14 @@ def _single_arg_op_layout(
                         )
                         if target_stl is None:
                             continue
-                        candidate = rescale_stl_for_dtype(target_stl, output.dtype, fmt)
+                        # This candidate sticks host dim target_hd, not the input's
+                        # stick dim, so its extent comes from that axis.
+                        candidate = rescale_stl_for_dtype(
+                            target_stl,
+                            output.dtype,
+                            fmt,
+                            stick_extent=concretize_expr(output.size[target_hd]),
+                        )
                         if candidate not in layouts:
                             layouts.append(candidate)
 
@@ -568,8 +589,19 @@ def _single_arg_op_layout(
         case spyreop.qfp8ch.default:
             # fp16 (64 elems/stick) -> fp8 (128 elems/stick) quantization.
             # Propagate the input device layout and rescale for the dtype change,
-            # preserving any padding present in the input STL.
-            return [rescale_stl_for_dtype(stl, output.dtype, ElementArrangement.QFP8CH)]
+            # preserving any padding present in the input STL. The stick count
+            # comes from the logical stick-axis extent so a single fp16 stick does
+            # not floor to zero sticks at fp8 (issue #4392).
+            return [
+                rescale_stl_for_dtype(
+                    stl,
+                    output.dtype,
+                    ElementArrangement.QFP8CH,
+                    stick_extent=stick_extent_from_coords(
+                        stl, in_layout, dep, output.size
+                    ),
+                )
+            ]
 
         case spyreop.qfp8wt.default:
             # fp16 -> fp8 weight quantization with 2D-stick layout [2, 64].

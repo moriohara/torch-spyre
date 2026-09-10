@@ -676,5 +676,331 @@ class TestSpyreTensorLayout(TestCase):
         torch.testing.assert_close(actual, expected, atol=0.1, rtol=0.1)
 
 
+@instantiate_parametrized_tests
+class TestRescaleStlForDtype(TestCase):
+    """rescale_stl_for_dtype must agree with the layout constructor (issue #4392).
+
+    Rescaling the input's *padded stick capacity* cannot reproduce the stick
+    count: capacity is identical for a 32- and a 64-element fp16 row, so it
+    over-counts narrowing conversions and floors to zero sticks for a sub-stick
+    widening one, which later divides by zero in the D2H copy path.
+    """
+
+    # Shapes spanning stick-aligned, sub-stick, and unaligned stick extents.
+    # The higher-rank entries matter: their stride_map carries more than one dim
+    # with stride == elems_per_stick, so the num-sticks dim is ambiguous by the
+    # stride test alone (e.g. 2x4x8x64 fp16 -> [512, 64, 64, 2048, 1]).
+    SHAPES = [
+        (4, 16),
+        (4, 32),
+        (4, 63),
+        (4, 64),
+        (4, 68),
+        (4, 128),
+        (8, 192),
+        (2, 4, 64),
+        (2, 4, 8, 64),
+        (2, 4, 8, 63),
+        (2, 4, 8, 68),
+        (1, 1, 4, 32),
+    ]
+
+    @parametrize("shape", SHAPES)
+    @parametrize(
+        "src_dtype,dst_dtype",
+        [(torch.float32, torch.float16), (torch.float16, torch.float32)],
+    )
+    def test_matches_canonical_layout(self, shape, src_dtype, dst_dtype):
+        from torch_spyre._inductor.constants import ElementArrangement
+        from torch_spyre._inductor.pass_utils import rescale_stl_for_dtype
+
+        src_stl = SpyreTensorLayout(list(shape), src_dtype)
+        rescaled = rescale_stl_for_dtype(
+            src_stl,
+            dst_dtype,
+            ElementArrangement.STANDARD,
+            stick_extent=shape[-1],
+        )
+        expected = SpyreTensorLayout(list(shape), dst_dtype)
+        self.assertEqual(
+            list(rescaled.device_size),
+            list(expected.device_size),
+            f"{shape} {src_dtype}->{dst_dtype}: rescaled device_size "
+            f"{list(rescaled.device_size)} != canonical "
+            f"{list(expected.device_size)}",
+        )
+        # The num-sticks stride must be rescaled too, not just its extent: a stale
+        # stride describes a differently-shaped tensor than device_size claims.
+        self.assertEqual(
+            list(rescaled.stride_map),
+            list(expected.stride_map),
+            f"{shape} {src_dtype}->{dst_dtype}: rescaled stride_map "
+            f"{list(rescaled.stride_map)} != canonical "
+            f"{list(expected.stride_map)}",
+        )
+        self.assertEqual(rescaled.device_dtype, get_device_dtype(dst_dtype))
+
+    @parametrize("shape", SHAPES)
+    @parametrize(
+        "src_dtype,dst_dtype",
+        [(torch.float32, torch.float16), (torch.float16, torch.float32)],
+    )
+    def test_no_zero_sized_dim_without_stick_extent(self, shape, src_dtype, dst_dtype):
+        """The capacity fallback may be imprecise, but must never yield a 0 dim.
+
+        A zero-sized device dim reaches an unguarded integer division in
+        get_device_stride_infos and kills the process with SIGFPE, so the
+        fallback clamps to at least one stick.
+        """
+        from torch_spyre._inductor.constants import ElementArrangement
+        from torch_spyre._inductor.pass_utils import rescale_stl_for_dtype
+
+        src_stl = SpyreTensorLayout(list(shape), src_dtype)
+        rescaled = rescale_stl_for_dtype(
+            src_stl, dst_dtype, ElementArrangement.STANDARD
+        )
+        self.assertNotIn(
+            0,
+            list(rescaled.device_size),
+            f"{shape} {src_dtype}->{dst_dtype}: zero-sized device dim "
+            f"{list(rescaled.device_size)}",
+        )
+
+    def test_sub_stick_widening_does_not_floor_to_zero(self):
+        """The exact reported case: one fp32 stick (capacity 32) -> fp16.
+
+        32 // 64 == 0 under the old capacity rescale.
+        """
+        from torch_spyre._inductor.constants import ElementArrangement
+        from torch_spyre._inductor.pass_utils import rescale_stl_for_dtype
+
+        src_stl = SpyreTensorLayout([4, 32], torch.float32)
+        self.assertEqual(list(src_stl.device_size), [1, 4, 32])
+        rescaled = rescale_stl_for_dtype(
+            src_stl,
+            torch.float16,
+            ElementArrangement.STANDARD,
+            stick_extent=32,
+        )
+        self.assertEqual(list(rescaled.device_size), [1, 4, 64])
+
+    def test_ambiguous_stride_map_picks_the_num_sticks_dim(self):
+        """Several dims can share stride == elems_per_stick; only one is the
+        num-sticks dim, and writing the count into the wrong one permutes the
+        tensor. 2x4x8x64 fp16 has stride_map [512, 64, 64, 2048, 1]: dims 1 and 2
+        both match, but dim 2 is the num-sticks dim.
+        """
+        from torch_spyre._inductor.constants import ElementArrangement
+        from torch_spyre._inductor.pass_utils import rescale_stl_for_dtype
+
+        src_stl = SpyreTensorLayout([2, 4, 8, 64], torch.float16)
+        self.assertEqual(list(src_stl.stride_map), [512, 64, 64, 2048, 1])
+        self.assertEqual(list(src_stl.device_size), [4, 8, 1, 2, 64])
+        rescaled = rescale_stl_for_dtype(
+            src_stl,
+            torch.float32,
+            ElementArrangement.STANDARD,
+            stick_extent=64,
+        )
+        # dim 2 goes 1 -> 2 sticks; dim 1 (size 8) must be untouched.
+        self.assertEqual(list(rescaled.device_size), [4, 8, 2, 2, 32])
+
+    def test_sentinel_stride_map_is_left_alone(self):
+        """A layout with no whole-stick stride (broadcast sentinel -1) is
+        untouched apart from the stick depth, before and after the fix."""
+        from torch_spyre._inductor.constants import ElementArrangement
+        from torch_spyre._inductor.pass_utils import rescale_stl_for_dtype
+
+        src_stl = SpyreTensorLayout([4, 1], torch.float32)
+        self.assertEqual(list(src_stl.stride_map), [-1, 1, -1])
+        rescaled = rescale_stl_for_dtype(
+            src_stl, torch.float16, ElementArrangement.STANDARD, stick_extent=1
+        )
+        self.assertEqual(list(rescaled.device_size), [1, 4, 64])
+        self.assertEqual(list(rescaled.stride_map), [-1, 1, -1])
+
+    # Non-canonical dim_order, i.e. the stick axis is not the last host dim.
+    # host_size lets the helper find it by validation instead of assuming
+    # size[-1]; these all fail if the stick count is taken from the last host dim.
+    PERMUTED_SHAPES = [(4, 32), (4, 63), (4, 68), (68, 4), (128, 4), (16, 4)]
+
+    @parametrize("shape", PERMUTED_SHAPES)
+    @parametrize(
+        "src_dtype,dst_dtype",
+        [(torch.float32, torch.float16), (torch.float16, torch.float32)],
+    )
+    def test_permuted_dim_order_matches_canonical(self, shape, src_dtype, dst_dtype):
+        """A column-major view resolves to the right stick axis via host_size."""
+        from torch_spyre._inductor.constants import ElementArrangement
+        from torch_spyre._inductor.pass_utils import rescale_stl_for_dtype
+
+        host_size = list(shape)
+        # Column-major: host dim 0 is the contiguous one, so it is the stick axis.
+        host_strides = [1, shape[0]]
+        dim_order = [1, 0]
+        src_stl = SpyreTensorLayout(host_size, host_strides, src_dtype, dim_order)
+        expected = SpyreTensorLayout(host_size, host_strides, dst_dtype, dim_order)
+        rescaled = rescale_stl_for_dtype(
+            src_stl,
+            dst_dtype,
+            ElementArrangement.STANDARD,
+            host_size=host_size,
+        )
+        self.assertEqual(
+            list(rescaled.device_size),
+            list(expected.device_size),
+            f"{shape} strides={host_strides} order={dim_order} "
+            f"{src_dtype}->{dst_dtype}: rescaled device_size "
+            f"{list(rescaled.device_size)} != canonical "
+            f"{list(expected.device_size)}",
+        )
+
+    def test_last_device_dim_is_never_a_num_sticks_candidate(self):
+        """The stick depth counts elements, not sticks.
+
+        Row-major host (4,32) with dim_order [1,0] has fp32 stride_map
+        [1024, 1, 32], whose *last* entry equals elems_per_stick. Selecting it
+        would overwrite the rescaled stick depth with a stick count.
+        """
+        from torch_spyre._inductor.constants import ElementArrangement
+        from torch_spyre._inductor.pass_utils import rescale_stl_for_dtype
+
+        src_stl = SpyreTensorLayout([4, 32], [32, 1], torch.float32, [1, 0])
+        self.assertEqual(list(src_stl.stride_map), [1024, 1, 32])
+        self.assertEqual(list(src_stl.device_size), [1, 32, 32])
+        self.assertEqual(len(src_stl.device_size) - 1, 2)  # the offending index
+        rescaled = rescale_stl_for_dtype(
+            src_stl,
+            torch.float16,
+            ElementArrangement.STANDARD,
+            host_size=[4, 32],
+        )
+        # The stick depth must be the fp16 depth, not a stick count.
+        self.assertEqual(rescaled.device_size[-1], 64)
+        expected = SpyreTensorLayout([4, 32], [32, 1], torch.float16, [1, 0])
+        self.assertEqual(list(rescaled.device_size), list(expected.device_size))
+
+    def test_disproven_candidate_is_left_alone(self):
+        """A known extent that rules out every candidate must not be estimated.
+
+        host (2,3,32) fp32 with dim_order [2,1,0] has stride_map
+        [32, 3072, 1, 96]: dim 0's stride coincides with elems_per_stick but its
+        size (3) is not the input stick count for any host extent. The capacity
+        estimate would write 2 there and permute the tensor; the canonical layout
+        leaves it at 3.
+        """
+        from torch_spyre._inductor.constants import ElementArrangement
+        from torch_spyre._inductor.pass_utils import rescale_stl_for_dtype
+
+        host_size, host_strides, dim_order = [2, 3, 32], [96, 32, 1], [2, 1, 0]
+        src_stl = SpyreTensorLayout(host_size, host_strides, torch.float32, dim_order)
+        self.assertEqual(list(src_stl.stride_map), [32, 3072, 1, 96])
+        self.assertEqual(list(src_stl.device_size), [3, 1, 32, 32])
+        rescaled = rescale_stl_for_dtype(
+            src_stl,
+            torch.float16,
+            ElementArrangement.STANDARD,
+            host_size=host_size,
+        )
+        expected = SpyreTensorLayout(host_size, host_strides, torch.float16, dim_order)
+        self.assertEqual(list(rescaled.device_size), list(expected.device_size))
+        self.assertEqual(list(rescaled.device_size), [3, 1, 32, 64])
+
+    # Stick axis with a non-unit host stride, i.e. not host-contiguous. Its
+    # num-sticks stride is host_stride[stick_dim] * elems_per_stick, so a bare
+    # `stride == elems_per_stick` test matches nothing and the layout is declined
+    # outright. The general factor is stride_map[-1], the inner-stick stride.
+    # Row-major, so host dim 0 is the stick axis and carries host stride 4.
+    NON_CONTIGUOUS_STICK_AXIS = [([68, 4], [4, 1]), ([132, 4], [4, 1])]
+
+    @parametrize("host_size,host_strides", NON_CONTIGUOUS_STICK_AXIS)
+    @parametrize(
+        "src_dtype,dst_dtype",
+        [(torch.float32, torch.float16), (torch.float16, torch.float32)],
+    )
+    def test_non_contiguous_stick_axis_matches_canonical(
+        self, host_size, host_strides, src_dtype, dst_dtype
+    ):
+        """The num-sticks stride is host_stride[stick_dim] * elems_per_stick.
+
+        Row-major host (68,4) with dim_order [1,0] makes host dim 0 the stick axis
+        with host stride 4, so fp16 stride_map is [256, 1, 4] -- the num-sticks
+        stride is 4*64, not 64. A bare ``stride == elems_per_stick`` test matches
+        nothing here and the layout is declined outright. Recognising it needs
+        stride_map[-1], which is already on the layout, so no host strides have to
+        be threaded in.
+        """
+        from torch_spyre._inductor.constants import ElementArrangement
+        from torch_spyre._inductor.pass_utils import rescale_stl_for_dtype
+
+        dim_order = [1, 0]
+        src_stl = SpyreTensorLayout(host_size, host_strides, src_dtype, dim_order)
+        # The stick axis is not host-contiguous: its host stride is the inner-stick
+        # stride the layout records, and it is not 1.
+        self.assertEqual(src_stl.stride_map[-1], host_strides[dim_order[-1]])
+        self.assertNotEqual(src_stl.stride_map[-1], 1)
+        rescaled = rescale_stl_for_dtype(
+            src_stl,
+            dst_dtype,
+            ElementArrangement.STANDARD,
+            host_size=host_size,
+        )
+        expected = SpyreTensorLayout(host_size, host_strides, dst_dtype, dim_order)
+        self.assertEqual(list(rescaled.device_size), list(expected.device_size))
+        self.assertEqual(list(rescaled.stride_map), list(expected.stride_map))
+
+    def test_non_contiguous_stick_axis_exact_values(self):
+        """Pins the numbers behind the parametrized case above.
+
+        Host (68,4) needs 2 fp16 sticks for the 68-element axis and 3 fp32 ones,
+        and the num-sticks stride is 4*64 == 256 at fp16, 4*32 == 128 at fp32.
+        """
+        from torch_spyre._inductor.constants import ElementArrangement
+        from torch_spyre._inductor.pass_utils import rescale_stl_for_dtype
+
+        src_stl = SpyreTensorLayout([68, 4], [4, 1], torch.float16, [1, 0])
+        self.assertEqual(list(src_stl.device_size), [2, 4, 64])
+        self.assertEqual(list(src_stl.stride_map), [256, 1, 4])
+        rescaled = rescale_stl_for_dtype(
+            src_stl,
+            torch.float32,
+            ElementArrangement.STANDARD,
+            host_size=[68, 4],
+        )
+        self.assertEqual(list(rescaled.device_size), [3, 4, 32])
+        self.assertEqual(list(rescaled.stride_map), [128, 1, 4])
+
+    def test_stride_is_rescaled_even_when_the_count_is_ambiguous(self):
+        """Declining the stick *count* must not leave the stick *stride* stale.
+
+        The count needs the host extent; the stride is
+        host_stride[stick_dim] * elems_per_stick and needs only stride_map[-1], so
+        the two are independent. Host (4,63) column-major fp16 is one stick and both
+        host extents (4 and 63) give in_sticks == 1 while implying different fp32
+        counts, so the count is rightly declined -- but the canonical layout still
+        halves the num-sticks stride from 64 to 32, and so must we.
+        """
+        from torch_spyre._inductor.constants import ElementArrangement
+        from torch_spyre._inductor.pass_utils import rescale_stl_for_dtype
+
+        host_size, host_strides, dim_order = [4, 63], [1, 4], [1, 0]
+        src_stl = SpyreTensorLayout(host_size, host_strides, torch.float16, dim_order)
+        self.assertEqual(list(src_stl.device_size), [1, 63, 64])
+        self.assertEqual(list(src_stl.stride_map), [64, 4, 1])
+        rescaled = rescale_stl_for_dtype(
+            src_stl,
+            torch.float32,
+            ElementArrangement.STANDARD,
+            host_size=host_size,
+        )
+        expected = SpyreTensorLayout(host_size, host_strides, torch.float32, dim_order)
+        # The count stayed at 1 (correctly, and it is what the canonical layout has)
+        # while the stride went 64 -> 32.
+        self.assertEqual(list(expected.device_size), [1, 63, 32])
+        self.assertEqual(list(expected.stride_map), [32, 4, 1])
+        self.assertEqual(list(rescaled.device_size), [1, 63, 32])
+        self.assertEqual(list(rescaled.stride_map), [32, 4, 1])
+
+
 if __name__ == "__main__":
     run_tests()
