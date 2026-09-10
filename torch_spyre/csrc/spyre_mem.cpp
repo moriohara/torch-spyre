@@ -259,11 +259,30 @@ auto get_device_stride_infos(c10::IntArrayRef sizes,
     for (int j = tile_map[i].size() - 1; j > -1; j--) {
       const int tile_index = tile_map[i][j];
       const int64_t tile_size = stl.device_size[tile_index];
+
+      // A zero-sized device dim would make elements_before zero below, and the
+      // next iteration would then evaluate host_size % 0 -- an integer division
+      // by zero, i.e. SIGFPE rather than a catchable error (issue #4392).
+      // Reject the malformed layout here, while it can still be named.
+      TORCH_CHECK(tile_size > 0, "Zero-sized device dim ", tile_index,
+                  " in device layout ", stl.toString(),
+                  ": cannot compute copy strides");
+      TORCH_CHECK(host_stride != 0, "Zero host stride for host dim ", i,
+                  " with device layout ", stl.toString(),
+                  ": cannot compute copy strides");
+
       const int64_t tile_stride = host_strides[tile_index] / host_stride;
 
       // Size 1 dimensions are ignored.
       if (tile_size == 1) continue;
 
+      TORCH_CHECK(tile_stride > 0, "Non-positive tile stride ", tile_stride,
+                  " for device dim ", tile_index, " in device layout ",
+                  stl.toString(), ": cannot compute copy strides");
+      TORCH_CHECK(elements_before > 0, "Non-positive elements_before ",
+                  elements_before, " at device dim ", tile_index,
+                  " in device layout ", stl.toString(),
+                  ": cannot compute copy strides");
       TORCH_CHECK(
           host_size % elements_before == 0,
           "Invalid device sizes and stride map for host sizes and strides");
@@ -297,6 +316,13 @@ auto get_device_stride_infos(c10::IntArrayRef sizes,
         const int next_index = tile_map[i][j];
         const int64_t next_size = stl.device_size[next_index];
         const int64_t next_stride = host_strides[next_index] / host_stride;
+
+        TORCH_CHECK(next_size > 0, "Zero-sized device dim ", next_index,
+                    " in device layout ", stl.toString(),
+                    ": cannot compute copy remainder");
+        TORCH_CHECK(next_stride > 0, "Non-positive tile stride ", next_stride,
+                    " for device dim ", next_index, " in device layout ",
+                    stl.toString(), ": cannot compute copy remainder");
 
         const int64_t tiled_elements = current_elements / next_stride;
 

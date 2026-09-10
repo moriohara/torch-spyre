@@ -170,6 +170,29 @@ class TestSpyreTensorLayout(TestCase):
         self.assertEqual(stl.device_size, [4, 512, 64])
         self.assertEqual(stl.stride_map, [64, 256, 1])
 
+    def test_zero_sized_device_dim_raises_instead_of_faulting(self):
+        """A malformed layout must be diagnosable, not fatal (issue #4392).
+
+        get_device_stride_infos skips ``tile_size == 1`` but used not to skip
+        ``tile_size == 0``, so a zero-sized device dim zeroed ``elements_before``
+        and the next tile evaluated ``host_size % 0``. On x86 that is SIGFPE: the
+        process dies with no Python exception, no traceback and no test failure,
+        which is why a full inductor run presented as suite flakiness rather than
+        as a bug. The layout below is exactly what the unfixed
+        rescale_stl_for_dtype produced -- one fp32 stick of capacity 32 floored to
+        ``32 // 64 == 0`` fp16 sticks.
+        """
+        from torch_spyre._C import set_spyre_tensor_layout
+
+        x = torch.rand([4, 32], dtype=torch.float16).to("spyre")
+        bad = SpyreTensorLayout(
+            [0, 4, 64], [64, 32, 1], get_device_dtype(torch.float16)
+        )
+        self.assertIn(0, bad.device_size)
+        set_spyre_tensor_layout(x, bad)
+        with self.assertRaisesRegex(RuntimeError, "Zero-sized device dim"):
+            x.cpu()
+
     def test_equality_and_hashable(self):
         x = SpyreTensorLayout([512, 256], torch.float16)
         y = SpyreTensorLayout([512, 256], [256, 1], torch.float16, [0, 1])
