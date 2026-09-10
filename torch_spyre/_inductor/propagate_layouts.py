@@ -500,91 +500,71 @@ def _single_arg_op_layout(
 
             fmt = DtypeOpTable.ea_map(in_layout.dtype, output.dtype, input_ea)
 
-            # Two strategies, chosen by whether a staggered EA is involved:
+            # Propagate the input's device_size/stride_map and rescale just the
+            # stick depth. This is required for the staggered conversions (RMSNorm
+            # up/down-cast and their restoration: STANDARD<->DL16_TO_FP32 /
+            # FP32_TO_DL16), whose element ordering exists only on the physical
+            # device layout -- reconstructing from the logical host size would lose
+            # it -- and it also preserves the input's padding for plain conversions.
             #
-            # 1. Staggered conversions (RMSNorm up/down-cast and their
-            #    restoration: STANDARD<->DL16_TO_FP32 / FP32_TO_DL16). The
-            #    staggered element ordering only exists on the physical device
-            #    layout, so we must propagate the input's device_size/stride_map
-            #    and rescale just the stick depth via rescale_stl_for_dtype.
-            #    Reconstructing from the logical host size would lose it.
+            # Plain conversions used to take a separate dense-reconstruction path,
+            # because a degenerate input layout (qfp8ch floored a size-1 num-sticks
+            # dim to 0 via 1*64//128) would otherwise be propagated verbatim,
+            # changing the layout rank and downstream graph partitioning. That cause
+            # is gone since #4392: the helper now derives the count from the logical
+            # extent and can never emit a zero.
             #
-            # 2. Plain conversions (e.g. fp8->fp16 after qfp8ch). Here the input
-            #    device layout can be degenerate — qfp8ch rescales a size-1
-            #    num-sticks dim to 0 (1*64//128), leaving a size-0 dim — and
-            #    rescale_stl_for_dtype would faithfully propagate that garbage,
-            #    changing the layout rank and downstream graph partitioning.
-            #    Rebuild a clean dense layout from the output host size instead,
-            #    as the general (non-EA) convert path does.
-            if fmt in STAGGERED_EAS or input_ea in STAGGERED_EAS:
-                # The rescaled num-sticks count must come from the logical extent
-                # of the stick axis, not from the input's padded stick capacity
-                # (issue #4392). A None extent leaves the helper on its clamped
-                # capacity estimate.
-                layouts = [
-                    rescale_stl_for_dtype(
-                        stl,
-                        output.dtype,
-                        fmt,
-                        stick_extent=stick_extent_from_coords(
-                            stl, in_layout, dep, output.size
-                        ),
-                    )
-                ]
-
-                # A conversion that creates a staggered EA must also expose
-                # outputs reachable by restickifying its STANDARD input first.
-                # Otherwise the conversion permanently inherits the input's
-                # stick and a downstream reduction-broadcast join has no way to
-                # request the normalized dimension as the stick. Gemma 4 hits
-                # this when an embedding output enters RMSNorm with its sequence
-                # dimension on the stick.
-                if fmt in STAGGERED_EAS and input_ea == ElementArrangement.STANDARD:
-                    in_coords = host_coordinates(in_layout, dep, None)
-                    source_device_coords = device_coordinates(stl, dep, None)
-                    for target_hd, target_stick_expr in enumerate(in_coords):
-                        if not target_stick_expr.free_symbols:
-                            continue
-                        target_stl = compute_restickify_target_layout(
-                            stl,
-                            in_layout,
-                            target_stick_expr,
-                            in_coords,
-                            source_device_coords,
-                        )
-                        if target_stl is None:
-                            continue
-                        # This candidate sticks host dim target_hd, not the input's
-                        # stick dim, so its extent comes from that axis.
-                        candidate = rescale_stl_for_dtype(
-                            target_stl,
-                            output.dtype,
-                            fmt,
-                            stick_extent=concretize_expr(output.size[target_hd]),
-                        )
-                        if candidate not in layouts:
-                            layouts.append(candidate)
-
-                # Under the current EA map, an already-staggered input is the
-                # reverse staggered-to-STANDARD restoration. It needs no
-                # expansion: preserve the stick selected before the upcast.
-
-                return layouts
-
-            # Dense reconstruction from the output host size. When the input
-            # stick dim is unaligned, force a full input-stick depth so stick
-            # padding is reflected in the device layout (see #1756 example above).
-            in_elems_per_stick = get_elem_in_stick(in_layout.dtype)
-            if concretize_expr(in_layout.size[-1] % in_elems_per_stick) > 0:
-                c_size = [concretize_expr(s) for s in output.size[:-1]] + [
-                    in_elems_per_stick
-                ]
-                c_stride = [concretize_expr(s) for s in output.stride[:-1]] + [1]
-            return [
-                SpyreTensorLayout(
-                    c_size, c_stride, output.dtype, list(range(len(c_size))), fmt
+            # The rescaled num-sticks count must come from the logical extent of the
+            # stick axis, not from the input's padded stick capacity (#4392). A None
+            # extent leaves the helper on its clamped capacity estimate.
+            layouts = [
+                rescale_stl_for_dtype(
+                    stl,
+                    output.dtype,
+                    fmt,
+                    stick_extent=stick_extent_from_coords(
+                        stl, in_layout, dep, output.size
+                    ),
                 )
             ]
+
+            # A conversion that creates a staggered EA must also expose outputs
+            # reachable by restickifying its STANDARD input first. Otherwise the
+            # conversion permanently inherits the input's stick and a downstream
+            # reduction-broadcast join has no way to request the normalized
+            # dimension as the stick. Gemma 4 hits this when an embedding output
+            # enters RMSNorm with its sequence dimension on the stick.
+            if fmt in STAGGERED_EAS and input_ea == ElementArrangement.STANDARD:
+                in_coords = host_coordinates(in_layout, dep, None)
+                source_device_coords = device_coordinates(stl, dep, None)
+                for target_hd, target_stick_expr in enumerate(in_coords):
+                    if not target_stick_expr.free_symbols:
+                        continue
+                    target_stl = compute_restickify_target_layout(
+                        stl,
+                        in_layout,
+                        target_stick_expr,
+                        in_coords,
+                        source_device_coords,
+                    )
+                    if target_stl is None:
+                        continue
+                    # This candidate sticks host dim target_hd, not the input's
+                    # stick dim, so its extent comes from that axis.
+                    candidate = rescale_stl_for_dtype(
+                        target_stl,
+                        output.dtype,
+                        fmt,
+                        stick_extent=concretize_expr(output.size[target_hd]),
+                    )
+                    if candidate not in layouts:
+                        layouts.append(candidate)
+
+            # Under the current EA map, an already-staggered input is the reverse
+            # staggered-to-STANDARD restoration. It needs no expansion: preserve
+            # the stick selected before the upcast.
+
+            return layouts
 
         case spyreop.qfp8ch.default:
             # fp16 (64 elems/stick) -> fp8 (128 elems/stick) quantization.
