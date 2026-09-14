@@ -329,6 +329,64 @@ def _ensure_synthetic_origin(result, target, args: tuple) -> None:
     buf.origins = OrderedSet([fx_node])
 
 
+# aten.le: the hardware has no integer compare ("Unsupported: lesserequal on
+# DataFormats.IEEE_INT32"), so integer OPERANDS must be cast to float before the
+# native op runs. Only the operands change -- the RESULT stays torch.bool, which
+# is what aten.le returns. On device a bool is stored in an fp16/fp32-width
+# physical format; _BOOL_EQUIVALENT_DTYPES in dtype_ops.py maps the physical
+# format back to the dtype its layout is built from, so the logical dtype can
+# remain bool. Returning fp16/fp32 instead would diverge from torch semantics
+# and make the result illegal as a `where` predicate.
+#
+# type_promotion_kind=None skips transform_args' automatic pre-cast so lower_le
+# can inspect the original input dtypes and choose the operand dtype itself.
+# override_return_dtype=torch.bool must be passed HERE as well as to
+# make_pointwise: register_spyre_lowering forwards both to Inductor's
+# process-global op_dtype_propagation_rules, and omitting it overwrites torch's
+# own rule for "le" with OpDtypeRule(None, None). That registry is never
+# restored (unlike the lowering overlay, which enable_spyre_lowerings() saves
+# and restores), so a missing override breaks `le` codegen for the cpp/triton
+# backends in the same process -- compiles that never touch Spyre at all.
+_le_pointwise = lowering.make_pointwise(
+    lowering.ops_wrapper("le"), override_return_dtype=torch.bool
+)
+
+
+@register_spyre_lowering(
+    [torch.ops.aten.le.Tensor, torch.ops.aten.le.Scalar],
+    name="le",
+    broadcast=True,
+    type_promotion_kind=None,
+    override_return_dtype=torch.bool,
+)
+def lower_le(a, b):
+    from torch._prims_common import ELEMENTWISE_TYPE_PROMOTION_KIND, elementwise_dtypes
+
+    # Promote over tensor operands only. A Python scalar must not drag the
+    # comparison up to fp32 (fp16_tensor <= 0.5 stays an fp16 compare), so it is
+    # converted to the operand dtype's own kind instead of taking part here.
+    tensor_dtypes = [v.get_dtype() for v in (a, b) if hasattr(v, "get_dtype")]
+    if all(dtype == torch.bool for dtype in tensor_dtypes):
+        # bool × bool: the fp16-physical bool values compare directly, no cast.
+        operand_dtype = torch.bool
+    else:
+        _, operand_dtype = elementwise_dtypes(
+            *(torch.empty(0, dtype=dtype) for dtype in tensor_dtypes),
+            type_promotion_kind=ELEMENTWISE_TYPE_PROMOTION_KIND.INT_TO_FLOAT,
+        )
+
+    def cast_operand(v):
+        if hasattr(v, "get_dtype"):
+            return lowering.to_dtype(v, operand_dtype)
+        # Python scalar: type_promotion_kind=None means Inductor never wrapped
+        # it in a TensorBox, so lowering.to_dtype would fail on it.
+        if operand_dtype.is_floating_point:
+            return float(v)
+        return v
+
+    return _le_pointwise(cast_operand(a), cast_operand(b))
+
+
 @register_spyre_lowering(torch.ops.spyre.scaled_mm.default)
 def lower_scaled_mm(
     mat1,
