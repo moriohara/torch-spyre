@@ -35,7 +35,7 @@ from .. import config
 from ..core_mapping import (
     core_mappings_equal,
     owner_slots,
-    partition_physical_span_bytes,
+    partition_lx_size_bytes,
     _loop_regions,
     _LOOP_POINT,
     _MAX_EXACT_DIRECT_AXIS_POINTS,
@@ -301,12 +301,12 @@ def partition_footprint(layout: FixedTiledLayout, view: PerCoreView) -> int:
     """Measure a relayout candidate in normalized standard device layout.
 
     FixedTiledLayout can wrap an explicit device shape, so its type alone does
-    not guarantee a complete final stick axis. The span helper validates it.
+    not guarantee a complete final stick axis. The size helper validates it.
     """
     device_layout = layout.device_layout
     if device_layout.element_arrangement != ElementArrangement.STANDARD:
         raise ValueError("relayout footprint requires standard element arrangement")
-    return partition_physical_span_bytes(
+    return partition_lx_size_bytes(
         tuple(int(size) for size in device_layout.device_size),
         device_layout.device_dtype,
         dict(view.work_slice_dims),
