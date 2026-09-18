@@ -177,7 +177,12 @@ cases:
           init: randint
           init_args:
             high: 1000
-      - tensor:
+    description: 'https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/xlm_roberta/modeling_xlm_roberta.py#L106 in forward,
+      code: buffered_token_type_ids = torch.gather(buffered_token_type_ids, dim=1, index=position_ids)'
+    kwmap:
+      dim: 1
+      index:
+        tensor:
           shape: [1, 13]
           stride: [13, 1]
           storage_offset: 0
@@ -186,10 +191,6 @@ cases:
           init: randint
           init_args:
             high: 514
-    description: 'https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/xlm_roberta/modeling_xlm_roberta.py#L106 in forward,
-      code: buffered_token_type_ids = torch.gather(buffered_token_type_ids, dim=1, index=position_ids)'
-    kwmap:
-      dim: 1
   - name: torch.Tensor.expand.2
     op: torch.Tensor.expand
     inputs:
@@ -363,11 +364,12 @@ cases:
           dtype: torch.bfloat16
           device: cuda
           init: rand
-      - value: 0.1
-      - value: false
-      - value: false
     description: 'https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/models/xlm_roberta/modeling_xlm_roberta.py#L120 in forward,
       code: embeddings = self.dropout(embeddings)'
+    kwmap:
+      p: 0.1
+      training: false
+      inplace: false
     marks:
       - bf16operation
       - constant

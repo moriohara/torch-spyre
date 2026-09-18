@@ -426,6 +426,11 @@ OP_REGISTRY: Dict[str, OpAdapter] = {
         "_operator.setitem", _tensor_setitem_, is_inplace=True
     ),
     "torch.ops.aten.index": OpAdapter("torch.ops.aten.index", _aten_index),
+    # torch.gather(input, dim, index): pass-through. Traced call sites use the
+    # keyword form (dim=..., index=...), so YAML cases carry both in kwargs --
+    # an index tensor recorded as a positional arg would bind to `dim` and raise.
+    "torch.gather": OpAdapter("torch.gather", torch.gather),
+    "torch.Tensor.gather": OpAdapter("torch.gather", torch.gather),
     # Scatter / copy / masking
     "torch.scatter": OpAdapter("torch.scatter", torch.scatter),
     "torch.scatter_": OpAdapter("torch.scatter_", _tensor_scatter_, is_inplace=True),
