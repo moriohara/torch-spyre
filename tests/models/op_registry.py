@@ -314,13 +314,17 @@ def _tensor_add_(x: torch.Tensor, other, alpha=1):
 
 
 def _tensor_and_(x: torch.Tensor, other):
-    x &= other
-    return x
+    # operator.and_ / operator.or_, which is what traced call sites such as
+    # `result = result & mask(...)` record: out-of-place and broadcasting.
+    # An in-place `x &= other` cannot express a case whose operands broadcast
+    # (issue#4662), and would make the harness compare the mutated arg0 instead
+    # of the result. A genuinely in-place capture (__iand__ / __ior__) needs its
+    # own registry key.
+    return x & other
 
 
 def _tensor_or_(x: torch.Tensor, other):
-    x |= other
-    return x
+    return x | other
 
 
 def _tensor_copy_(x: torch.Tensor, source: torch.Tensor):
@@ -449,7 +453,7 @@ OP_REGISTRY: Dict[str, OpAdapter] = {
     "torch.gt": OpAdapter("torch.gt", _torch_gt),
     "torch.logical_and": OpAdapter("torch.logical_and", torch.logical_and),
     "torch.bitwise_or": OpAdapter("torch.bitwise_or", torch.bitwise_or),
-    "torch.or_": OpAdapter("torch.or_", _tensor_or_, is_inplace=True),
+    "torch.or_": OpAdapter("torch.or_", _tensor_or_),
     # Type/device conversions
     "torch.float": OpAdapter("torch.float", _tensor_float),
     "float": OpAdapter("torch.float", _tensor_float),
@@ -602,7 +606,7 @@ OP_REGISTRY: Dict[str, OpAdapter] = {
     ),
     # In-place add_ listed separately
     "torch.add_": OpAdapter("torch.add_", _tensor_add_, is_inplace=True),
-    "torch.and_": OpAdapter("torch.and_", _tensor_and_, is_inplace=True),
+    "torch.and_": OpAdapter("torch.and_", _tensor_and_),
     # "torch.add_": OpAdapter("torch.add_", torch.Tensor.add_, is_inplace=True),
 }
 
