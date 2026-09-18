@@ -553,7 +553,7 @@ test_suite_config:
                   tags:
                     - constant
                     - torch.to.1
-                - name: torch.and_
+                - name: torch.bitwise_and
                   sample_inputs_func:
                     args:
                       - tensor:
@@ -571,7 +571,7 @@ test_suite_config:
                   description: 'https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/masking_utils.py#L56 in and_mask, code: result
                     = result & mask(batch_idx, head_idx, q_idx, kv_idx).to(result.device)'
                   tags:
-                    - torch.and_.1
+                    - torch.bitwise_and.1
                 - name: torch.getitem
                   sample_inputs_func:
                     args:
@@ -618,7 +618,7 @@ test_suite_config:
                   tags:
                     - constant
                     - torch.to.2
-                - name: torch.and_
+                - name: torch.bitwise_and
                   sample_inputs_func:
                     args:
                       - tensor:
@@ -636,7 +636,7 @@ test_suite_config:
                   description: 'https://github.com/huggingface/transformers/blob/v5.15.0/src/transformers/masking_utils.py#L56 in and_mask, code: result
                     = result & mask(batch_idx, head_idx, q_idx, kv_idx).to(result.device)'
                   tags:
-                    - torch.and_.2
+                    - torch.bitwise_and.2
                 - name: torch.Tensor.expand
                   sample_inputs_func:
                     args:

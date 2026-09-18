@@ -492,8 +492,8 @@ cases:
     marks:
       - constant
 
-  - name: torch.and_.1
-    op: torch.and_
+  - name: torch.bitwise_and.1
+    op: torch.bitwise_and
     inputs:
       - tensor:
           shape: [1, 1, 13, 1]
@@ -555,8 +555,8 @@ cases:
     marks:
       - constant
 
-  - name: torch.and_.2
-    op: torch.and_
+  - name: torch.bitwise_and.2
+    op: torch.bitwise_and
     inputs:
       - tensor:
           shape: [1, 1, 13, 1]
