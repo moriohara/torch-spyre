@@ -1031,6 +1031,80 @@ class TestRescaleStlForDtype(TestCase):
             f"{list(expected.device_size)}",
         )
 
+    # A staggered EA is a statement about *within-stick* order. A sparse stick --
+    # ``stride_map[-1] < 0``, i.e. the stick axis is an extent-1 host dim -- holds
+    # one valid host element, so there is no such order to describe and the
+    # conversion output is an ordinary STANDARD stick. Reductions produce these
+    # constantly: ``mean(dim=-1, keepdim=True)`` leaves the reduced axis at extent 1
+    # on the stick, and downcasting that result is the RMSNorm case that used to
+    # label two buffers FP32_TO_DL16. ``DtypeOpTable.ea_map`` (dtype_ops.py) keys on
+    # (src dtype, dst dtype, src ea) alone and structurally cannot see a geometry,
+    # so the correction lives in ``rescale_stl_for_dtype``, which holds both.
+    SPARSE_STICK_SHAPES = [(1, 280, 1), (4, 1), (2, 4, 1), (1, 1)]
+
+    # Same conversions on a stick that really does carry several host elements, so
+    # the stagger is observable and must survive. Without this control the test
+    # above passes for a helper that simply never stamps a staggered EA.
+    DENSE_STICK_SHAPES = [(4, 32), (4, 64), (4, 68), (2, 4, 64)]
+
+    STAGGERING_CONVERTS = [
+        (torch.float32, torch.float16, ElementArrangement.FP32_TO_DL16),
+        (torch.float16, torch.float32, ElementArrangement.DL16_TO_FP32),
+    ]
+
+    @parametrize("shape", SPARSE_STICK_SHAPES)
+    @parametrize("src_dtype,dst_dtype,staggered", STAGGERING_CONVERTS)
+    def test_sparse_stick_drops_staggered_ea(
+        self, shape, src_dtype, dst_dtype, staggered
+    ):
+        from torch_spyre._inductor.pass_utils import rescale_stl_for_dtype
+
+        src_stl = SpyreTensorLayout(list(shape), src_dtype)
+        self.assertLess(
+            src_stl.stride_map[-1],
+            0,
+            f"{shape} {src_dtype} is not a sparse stick: "
+            f"stride_map={list(src_stl.stride_map)}",
+        )
+        rescaled = rescale_stl_for_dtype(
+            src_stl, dst_dtype, staggered, stick_extent=shape[-1]
+        )
+        self.assertEqual(
+            rescaled.element_arrangement,
+            ElementArrangement.STANDARD,
+            f"{shape} {src_dtype}->{dst_dtype}: a stick holding one host element "
+            f"cannot carry a stagger, got {rescaled.element_arrangement}",
+        )
+        # The EA correction must not disturb the geometry the helper exists to
+        # compute -- it stays equal to canonical, exactly as with a STANDARD ea.
+        expected = SpyreTensorLayout(list(shape), dst_dtype)
+        self.assertEqual(list(rescaled.device_size), list(expected.device_size))
+        self.assertEqual(list(rescaled.stride_map), list(expected.stride_map))
+
+    @parametrize("shape", DENSE_STICK_SHAPES)
+    @parametrize("src_dtype,dst_dtype,staggered", STAGGERING_CONVERTS)
+    def test_dense_stick_keeps_staggered_ea(
+        self, shape, src_dtype, dst_dtype, staggered
+    ):
+        from torch_spyre._inductor.pass_utils import rescale_stl_for_dtype
+
+        src_stl = SpyreTensorLayout(list(shape), src_dtype)
+        self.assertGreater(
+            src_stl.stride_map[-1],
+            0,
+            f"{shape} {src_dtype} is not a dense stick: "
+            f"stride_map={list(src_stl.stride_map)}",
+        )
+        rescaled = rescale_stl_for_dtype(
+            src_stl, dst_dtype, staggered, stick_extent=shape[-1]
+        )
+        self.assertEqual(
+            rescaled.element_arrangement,
+            staggered,
+            f"{shape} {src_dtype}->{dst_dtype}: the stagger is observable on a "
+            f"stick of {src_stl.device_size[-1]} elements and must be kept",
+        )
+
     def test_last_device_dim_is_never_a_num_sticks_candidate(self):
         """The stick depth counts elements, not sticks.
 

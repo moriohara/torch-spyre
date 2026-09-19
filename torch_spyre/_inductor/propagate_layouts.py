@@ -1424,6 +1424,20 @@ def _multi_arg_pointwise_layouts(
     # are bf16 and only the mean is genuinely broadcast-shaped; pruning the
     # activation instead of the mean makes the join infeasible. See
     # test_mixed_ea_noncanonical_staggered_broadcaster_fp16.
+    #
+    # The sparse half of that argument is now settled before control reaches here:
+    # ``rescale_stl_for_dtype`` stops labelling a convert whose stick holds a single
+    # host element as staggered, because no within-stick order exists there to
+    # stagger. So an operand all of whose candidates are sparse never joins the
+    # staggered group at all, and case 3 arises only where the staggered operand has
+    # a genuinely non-sparse candidate. That correction on its own also resolves the
+    # RMSNorm regression -- with it in place, the six ``mixed_ea`` building-block
+    # tests and the RMSNorm reproducer all pass under *either* branch of the
+    # condition below, and commit the same layouts. This tie-break is kept anyway:
+    # the stranding it avoids follows from an operand's *extent*, not from how a
+    # sparse stick happens to be labelled, and ``layouts[0]`` hands this code one EA
+    # per operand while the candidate list behind it may mix them (a list spans
+    # stick axes, and sparsity follows the axis).
     # A future extension may admit 2a/3.3 by inserting an explicit EA conversion
     # at extra cost.
     staggered_inputs = input_eas & STAGGERED_EAS

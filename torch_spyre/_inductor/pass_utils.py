@@ -63,6 +63,7 @@ from .constants import (
     ELIDED_COPY_BACK_ATTR,
     KEEP_BY_INDEX_OP,
     MATMUL_REDUCTION_OPS,
+    STAGGERED_EAS,
     TOPK_OPS,
 )
 from .ir import FixedTiledLayout, SpyreConstantFallback
@@ -379,6 +380,30 @@ def rescale_stl_for_dtype(
             )
         out_device_size[i] = capacity // out_eps
         out_stride_map[i] = stride_out
+    # A staggered EA is a statement about *within-stick* order: it says the
+    # conversion leaves this stick's elements interleaved rather than in host
+    # order. A sentinel inner stride means the stick axis does not advance -- an
+    # extent-1 host dim (see ``inner`` above) -- so the stick carries exactly one
+    # valid host element and there is no within-stick order to describe. Every
+    # reader agrees on where that lone element sits, so the stagger is not merely
+    # harmless here but unrepresentable, and the conversion produces an ordinary
+    # STANDARD stick.
+    #
+    # The caller cannot know this: ``ea`` reaches here from
+    # ``DtypeOpTable.ea_map``, keyed on (src dtype, dst dtype, src ea) alone
+    # (dtype_ops.py), which never sees a geometry. This is the one place that holds
+    # both, so the correction belongs here -- and being here it lands on every
+    # convert site at once (the three in ``propagate_layouts`` plus the eager
+    # ``.to()`` in ``_monkey_patch``) rather than per site.
+    #
+    # Sparsity is not a free choice: the convert copies ``stl``'s stick axis, so
+    # this fires on exactly the candidates whose *input* stick was already sparse.
+    # A buffer whose candidate list mixes the two (its list spans stick axes,
+    # offered upstream) therefore mixes EA, which is correct -- each candidate is
+    # labelled for its own geometry -- but note ``_multi_arg_pointwise_layouts``
+    # reads one EA per operand off ``layouts[0]``.
+    if ea in STAGGERED_EAS and out_stride_map[-1] < 0:
+        ea = ElementArrangement.STANDARD
     return SpyreTensorLayout(
         out_device_size,
         out_stride_map,
