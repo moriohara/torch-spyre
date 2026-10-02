@@ -2100,19 +2100,37 @@ def _lower_div_impl(x, y, *, rounding_mode=None):
         # SDSC).
         qf = _realized(lowering.div(x, y))
         qf = _realized(lowering.floor(qf))
-        # Quotient correction: correct floor-division satisfies 0 <= r < y.
-        # Assuming at most +/-1 quotient error from the divider:
-        #   r >= y  => qf underestimated by 1
-        #   r <  0  => qf overestimated by 1
+        # Quotient correction. Correct floor-division satisfies
+        #   0 <= rem*sign(y) < |y|
+        # which holds for EITHER sign of y (rem takes the sign of y and
+        # |rem| < |y|).  Folding the sign of y into rem keeps both comparisons
+        # exact -- crucially we must NOT divide again here, because the Spyre
+        # divider is the very thing being corrected: rem/y comes back just
+        # under 1.0 whenever y divides x exactly, which silently drops the +1.
+        #   rem*sign(y) >= |y|  => qf underestimated by 1
+        #   rem*sign(y) <  0    => qf overestimated by 1
         aten_ge = lowering.lowerings[torch.ops.aten.ge.Tensor]
         aten_lt = lowering.lowerings[torch.ops.aten.lt.Tensor]
         prod = _realized(lowering.mul(qf, y))
         rem = _realized(lowering.sub(x, prod))
-        over_est = _realized(aten_ge(rem, y))
-        under_est = _realized(aten_lt(rem, 0.0))
+        if hasattr(y, "get_dtype"):
+            y_neg = _realized(aten_lt(y, 0.0))
+            neg_rem = _realized(lowering.neg(rem))
+            neg_y = _realized(lowering.neg(y))
+            rem_s = _realized(lowering.where(y_neg, neg_rem, rem))
+            abs_y = _realized(lowering.where(y_neg, neg_y, y))
+        else:
+            # y is a Python scalar: its sign is known at compile time, so fold
+            # it statically instead of emitting the select.
+            rem_s = _realized(lowering.neg(rem)) if y < 0 else rem
+            abs_y = -y if y < 0 else y
+        over_est = _realized(aten_ge(rem_s, abs_y))
+        under_est = _realized(aten_lt(rem_s, 0.0))
         qf_plus1 = _realized(lowering.add(qf, 1.0))
-        qf_minus1 = _realized(lowering.sub(qf, 1.0))
         qf = _realized(lowering.where(over_est, qf_plus1, qf))
+        # qf_minus1 must derive from the UPDATED qf, so the two corrections
+        # compose instead of the second silently discarding the first.
+        qf_minus1 = _realized(lowering.sub(qf, 1.0))
         qf = _realized(lowering.where(under_est, qf_minus1, qf))
         # Cast back to result_dtype (e.g. fp32 → int32/int64 for integer inputs).
         if result_dtype is not None and result_dtype != comp_dtype:

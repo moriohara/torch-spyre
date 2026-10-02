@@ -6901,6 +6901,69 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                         differentiation=7,
                     ).to(torch.int64),
                 ),
+                # ── NEGATIVE divisors ────────────────────────────────────────────
+                # Every other divisor in this group is positive (abs=True /
+                # randint(2, 11) / scalar 2), so the sign handling in the
+                # quotient-correction step is otherwise untested.
+                "floor_int64_negdiv_2d": (
+                    "floor",
+                    cached_randn(
+                        (67, 256), dtype=torch.float16, scale=200.0, differentiation=2
+                    ).to(torch.int64),
+                    -cached_randn(
+                        (67, 256),
+                        dtype=torch.float16,
+                        abs=True,
+                        scale=20.0,
+                        differentiation=3,
+                    ).to(torch.int64),
+                ),
+                "floor_int64_mixedsign_2d": (
+                    "floor",
+                    torch.randint(
+                        -200,
+                        201,
+                        (67, 256),
+                        generator=torch.Generator().manual_seed(0xAF11),
+                    ),
+                    torch.where(
+                        torch.randint(
+                            0,
+                            2,
+                            (67, 256),
+                            generator=torch.Generator().manual_seed(0xAF12),
+                        ).bool(),
+                        1,
+                        -1,
+                    )
+                    * torch.randint(
+                        1,
+                        21,
+                        (67, 256),
+                        generator=torch.Generator().manual_seed(0xAF13),
+                    ),
+                ),
+                "floor_fp32_negdiv_2d": (
+                    "floor",
+                    cached_randn((67, 256), dtype=torch.float32, scale=50.0),
+                    -cached_randn(
+                        (67, 256),
+                        dtype=torch.float32,
+                        abs=True,
+                        scale=10.0,
+                        differentiation=1,
+                    ),
+                ),
+                "floor_fp32_negscalar": (
+                    "floor",
+                    torch.tensor([-10.5, -20.3, 30.7, -5.2], dtype=torch.float32),
+                    -2.0,
+                ),
+                "floor_int64_negscalar": (
+                    "floor",
+                    torch.tensor([-11, -21, 31, -7], dtype=torch.int64),
+                    -2,
+                ),
                 # ── trunc fp16/fp32: not yet implemented ─────────────────────────
                 # The Spyre lowering raises Unsupported for trunc on float types.
                 "trunc_fp16_rand_2d": (
@@ -10351,7 +10414,11 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         if isinstance(y, torch.Tensor):
             _replace_near_zero(y)
 
-        self.compare_with_cpu(fn, x, y)
+        # floor/trunc division is exact integer arithmetic, so compare exactly.
+        # At the default atol=rtol=0.1 an off-by-one quotient is tolerated for
+        # every |quotient| >= 9 -- i.e. the default tolerances hide precisely
+        # the class of error the quotient-correction step exists to fix.
+        self.compare_with_cpu(fn, x, y, atol=0, rtol=0)
 
     @pytest.mark.filterwarnings("ignore::torch_spyre.ops.fallbacks.FallbackWarning")
     @pytest.mark.filterwarnings("ignore:Backend Spyre does not support int64")
