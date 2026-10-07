@@ -31,9 +31,13 @@ below.
 
 - **B1 — "Floor division returns the wrong value for every negative divisor."**
   **Resolved for `floor`.** The sign-folded, division-free correction with
-  `qf_minus1` derived from the *updated* `qf` is in, and I confirmed it is not merely untested: reinstating the
-  round-1 defect makes two of the new cases fail, so the fix is real and pinned.
-  All 11 `test_div_rounding_mode` cases pass on device. Two things to keep in
+  `qf_minus1` derived from the *updated* `qf` is in, and I confirmed it is not
+  merely untested: reinstating the round-1 defect (compare `rem` against `y`
+  instead of `rem_s` against `abs_y`) makes **`floor_int64_negdiv_2d`** and
+  **`floor_int64_mixedsign_2d`** fail, so the fix is real and pinned by the new
+  tests. Those two are the only ones of the five negative-divisor sets that catch
+  it — finding 2 is about why the other three do not. All 11
+  `test_div_rounding_mode` cases pass on device. Two things to keep in
   mind, neither of them a re-open:
   - For **`trunc`** the round-1 defect is *gone* rather than fixed: there is no
     trunc branch any more. `lowering.py:2143-2145` raises
