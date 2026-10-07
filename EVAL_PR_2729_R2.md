@@ -1,13 +1,22 @@
 ## Round-2 review — head `1c4e621b`
 
-Thanks for the rework. #3802 and #4383 have both landed since round 1 (they are
-ancestors of this PR's merge-base `1a56c846`), so what this PR does now is
-**retrofit the already-merged code onto shared helpers** rather than add a fourth
-mechanism alongside two in-flight ones: `_promoted_dtype` / `_convert_to_dtype`
-are lowering-layer helpers, and `lower_where` (#4383) and `_cmp_operand_dtype` /
-`_lower_cmp_impl` (#3802) are converted onto them. That is the convergence I
-asked for, and it is better than what either merged PR had on its own — thank you
-for taking it on.
+Thanks for the rework. At round 1 the worry was divergence: this PR was adding a
+**fourth** dtype-promotion mechanism — its own `spyre::adapt_dtype` /
+`adapt_dtype_scalar` custom ops, at the *decomposition* layer — alongside three
+others, two of which were then still in flight (#3802's `_cmp_operand_dtype` /
+`_lower_cmp_impl` and #4383's `lower_where`) and one already on main
+(`with_int64_fallback`).
+
+Both of those PRs have since landed — they are ancestors of this PR's merge-base
+`1a56c846` — and this head goes the other way. The custom ops are **gone**,
+replaced by two *lowering*-layer helpers, `_promoted_dtype` and
+`_convert_to_dtype`; and the now-merged `lower_where` and `_cmp_operand_dtype` /
+`_lower_cmp_impl` are **refactored onto those helpers** rather than left standing
+beside them. So this PR is retrofitting already-merged code onto a shared
+mechanism instead of adding a fourth one. That is the convergence I asked for,
+and it leaves the tree better than either merged PR did on its own — thank you
+for taking it on. (`with_int64_fallback` is still separate, with its own six call
+sites; not this PR's job, and I'll follow up on it.)
 
 Verdict stays **REQUEST CHANGES**, for one blocker that only shows up on device:
 the quotient correction is unreliable whenever the **compute dtype is fp16**.
