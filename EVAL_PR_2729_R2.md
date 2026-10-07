@@ -256,10 +256,15 @@ divisions, and the tensor branch is already pinned by the two int64 sets.
 
 Related, so you can weigh it: the `atol=0, rtol=0` tightening is **not** what
 catches the round-1 defect — I ran the 2×2 over {defect, default tolerances} and
-the same two tests fail either way, because an off-by-one on a small quotient
-already breaks `atol=0.1`. The strict tolerance is what makes finding 1's class
-visible (off-by-one at `|q| >= 9`). Both changes are worth keeping, just for
-different reasons than the round-1 comment implied.
+the same two tests fail either way. The deciding factor is the *size* of the
+quotient, not the tolerance. `assert_close` passes when
+`|got - exp| <= atol + rtol*|exp|`, so at `atol=rtol=0.1` an off-by-one is
+tolerated for every `|q| >= 9` and caught for every `|q| < 9`. B1's off-by-ones
+land on small quotients (`-3` becomes `-2`), so the defaults already caught them.
+Finding 1's land on large ones (`22` for `95 // 4.3203125`, `229` for the
+`int32/fp16` case), which is why only the strict tolerance catches those. Both
+changes are worth keeping, just for different reasons than the round-1 comment
+implied.
 
 ### 3. [SUGGESTION] Two families compare at default tolerances, and one of them tests quotients fp16 cannot represent
 
