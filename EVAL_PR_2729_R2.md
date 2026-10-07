@@ -21,9 +21,17 @@ Everything else below is a suggestion or FYI.
 
 ### Resolved since round 1
 
-- **B1 — floor-div with negative divisors.** **Resolved for `floor`.** The
-  sign-folded, division-free correction with `qf_minus1` derived from the
-  *updated* `qf` is in, and I confirmed it is not merely untested: reinstating the
+The `B`/`Q`/`S` labels below are my own shorthand for the items in the
+[round-1 review](https://github.com/torch-spyre/torch-spyre/pull/2729#pullrequestreview-5390400153)
+— **B1**, **B2** its two BLOCKERs, **Q1**–**Q3** its QUESTIONs, **S1**, **S2**
+its SUGGESTIONs, numbered in the order they appear there. Round 1 did not label
+them, and its bullets have no anchors of their own, so each is quoted by title
+here. Plain **finding 1**–**4** always means this review's numbered findings
+below.
+
+- **B1 — "Floor division returns the wrong value for every negative divisor."**
+  **Resolved for `floor`.** The sign-folded, division-free correction with
+  `qf_minus1` derived from the *updated* `qf` is in, and I confirmed it is not merely untested: reinstating the
   round-1 defect makes two of the new cases fail, so the fix is real and pinned.
   All 11 `test_div_rounding_mode` cases pass on device. Two things to keep in
   mind, neither of them a re-open:
@@ -37,11 +45,19 @@ Everything else below is a suggestion or FYI.
     exact-division case (the B1 defect class was never exercisable in trunc), and
     the quotient-range problem in finding 3, since `trunc_fp16_rand_2d` reaches
     `|q| = 40608` against an fp16 ceiling of 1024.
-  - The sign logic is right; the **step it lives in** is what finding 1 is about.
-    B1 and the blocker are independent defects in the same correction — fixing
-    the signs did not and could not address the fp16 compute-dtype problem.
-- **B2 — tests and tolerances.** Largely resolved. Round 1 asked for two things
-  and each got a partial answer:
+  - B1 was one of **two independent defects in the same block of code**, and only
+    one of them is fixed. The block is the quotient correction at
+    `lowering.py:2103-2137`: `rem = x - qf*y`, compare `rem_s` against `abs_y`
+    and against `0`, then add or subtract 1. B1 was about how that block handles
+    **signs**, and the sign handling is now right. Finding 1 of this review (the
+    blocker, below) is about the **dtype the block is evaluated in**: every one of
+    those operations runs at `comp_dtype`, so when `comp_dtype` is fp16 the
+    residual `rem` rounds to exactly `0.0`, neither comparison fires, and no
+    correction is applied regardless of how correct the sign logic is. Fixing the
+    signs did not and could not address that.
+- **B2 — "No new test uses a negative divisor, and the default tolerances would
+  hide it even if one did."** Largely resolved. Round 1 asked for two things and
+  each got a partial answer:
   - *Add negative-divisor coverage* → five param sets added, but **three of the
     five are vacuous**: with the round-1 defect reinstated they still pass,
     because the defect needs exact division with a negative divisor and those
@@ -50,30 +66,37 @@ Everything else below is a suggestion or FYI.
     rtol=0`), but **the other two new families were not touched**:
     `test_div_mixed_dtype_cpu` and `test_div_scalar_dtypes_cpu` still compare at
     the default `atol=rtol=0.1`, and both include `floor_div` (finding 3).
-- **Q2 — why the Inductor built-ins instead of the Spyre `lower_*` wrappers.**
+- **Q2 — "Is the mixed-registry access in the floor path deliberate?"**
   Answered by the new comment at `lowering.py:2098-2100`, and the answer checks
   out: `register_spyre_lowering` writes into a separate `spyre_lowerings` dict
   (`:84`), so `lowering.lowerings[aten.ge.Tensor]` really is the upstream
   built-in. I substituted Spyre's `ge`/`lt` wrappers and got bit-identical
   results across six dtype domains, so the "both would be no-ops" claim holds for
   the comparisons. One nuance in the FYI list.
-- **S1 — the lx mirror.** Complete and live. All five name patterns collect; the
-  6 `mandatory_success` lx cases pass and the 4 `fp16_fp32_1d256` cases xfail,
+- **S1 — "Mirror the three new groups into the lx-planning config."** Complete
+  and live. All five name patterns collect; the 6 `mandatory_success` lx cases
+  pass and the 4 `fp16_fp32_1d256` cases xfail,
   exactly as the yaml claims. I also ran the whole div family under
   `LX_PLANNING=1` (147 tests): the only failure is
   `test_pointwise_binary_op_div_67x71x256_..._reduction` at 1/18176 elements,
   which is already `mode: xfail` in a config file this PR does not touch. Not a
   mirror gap.
 
-Still open from round 1: **Q1** (int64-via-fp32 domain limit — finding 4),
-**Q3** (the PR body still describes device int64 support rather than the host
-round-trip), **S2** (a trunk perf run), and the four round-1 FYIs.
+Still open from round 1: **Q1** ("What is the intended domain for the
+int64-via-fp32 path?" — carried forward as finding 4), **Q3** ("Which of the 14
+`test_div_mixed_dtype` cases actually exercise the device?" — the PR body still
+describes device int64 support rather than the host round-trip), **S2**
+("Consider a trunk perf run before merge."), and the four round-1 FYIs.
 
-### Withdrawn from round 1 — I was wrong
+### Withdrawn — claims of mine that were wrong
 
-- **S3 — "17 of 22 new `randint` params are unseeded".** Retracted; please
-  ignore it. The count is right (22 added calls, 5 with an explicit
-  `generator=`), but the conclusion was not: `TestOps` runs
+Both of these are from the round-2 review I took back on 10-06, not from round 1.
+If you read that version in a notification, please disregard these two parts of
+it; everything else in this review supersedes it.
+
+- **The unseeded-`randint` suggestion ("17 of 22 new `randint` params are
+  unseeded", item 3 there).** Retracted. The count is right (22 added calls, 5
+  with an explicit `generator=`), but the conclusion was not: `TestOps` runs
   `torch.manual_seed(0xAFFE)` in its class body (`:801`), which executes
   *before* the `PARAMS` dict literal is evaluated, so every one of those calls
   is in fact seeded. I verified it — two fresh processes give byte-identical
@@ -82,11 +105,15 @@ round-trip), **S2** (a trunk perf run), and the four round-1 FYIs.
   doing the work. Nothing to fix. The one residual property, and it is a note
   not an ask: this determinism is *positional*, so inserting a param set above
   an existing one shifts the data of everything after it.
-- **The claim that the fp16 test domain is "genuinely safe".** Also wrong. I
-  argued the data stays at `|x| ≲ 200` and is therefore below the problem
-  range. The numerators do, but the *quotients* reach 2×10⁴ — see finding 3.
-  The family is green because the tolerances are loose, not because the domain
-  is safe.
+- **Its corollary, "that is why finding 1 is green in CI — the `int32/fp16`
+  floor case is only wrong for some draws".** Wrong twice over. The draws do not
+  vary at all (same seed), and the case is wrong on **every** run — 4 of its 256
+  elements mismatch. What keeps CI green is that this family compares at
+  `atol=rtol=0.1`, which absorbs those mismatches, plus `expect_fail` on the
+  trunc family. I also reasoned from "the data stays at `|x| ≲ 200`, so it is
+  below the problem range": the *numerators* do, but the *quotients* reach
+  2×10⁴, well past what device fp16 can represent. The real explanation is
+  finding 3.
 
 ---
 
