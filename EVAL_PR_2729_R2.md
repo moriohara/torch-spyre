@@ -54,11 +54,12 @@ below.
     `lowering.py:2103-2137`: `rem = x - qf*y`, compare `rem_s` against `abs_y`
     and against `0`, then add or subtract 1. B1 was about how that block handles
     **signs**, and the sign handling is now right. Finding 1 of this review (the
-    blocker, below) is about the **dtype the block is evaluated in**: every one of
-    those operations runs at `comp_dtype`, so when `comp_dtype` is fp16 the
-    residual `rem` rounds to exactly `0.0`, neither comparison fires, and no
-    correction is applied regardless of how correct the sign logic is. Fixing the
-    signs did not and could not address that.
+    blocker, below) is about the **dtype the block is evaluated in**: `prod` and
+    `rem` are computed at `comp_dtype`, so in fp16 the residual the block needs to
+    see can round away. In the worked example it rounds to exactly `0.0`, which is
+    indistinguishable from "exact division, quotient already correct" — neither
+    comparison fires and the off-by-one stands. No amount of correct sign handling
+    reaches that: the block cannot act on a residual it cannot see.
 - **B2 — "No new test uses a negative divisor, and the default tolerances would
   hide it even if one did."** Largely resolved. Round 1 asked for two things and
   each got a partial answer:
