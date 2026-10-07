@@ -89,9 +89,9 @@ below.
   mirror gap.
 
 Still open from round 1: **Q1** ("What is the intended domain for the
-int64-via-fp32 path?" — carried forward as finding 4), **S2** ("Consider a trunk
-perf run before merge."), the four round-1 FYIs, and **Q3**, which is worth
-restating since it asks about what the PR *claims* rather than what it does:
+int64-via-fp32 path?" — carried forward as finding 4), the four round-1 FYIs,
+and **Q3**, which is worth restating since it asks about what the PR *claims*
+rather than what it does:
 
 - **Q3 — "Which of the 14 `test_div_mixed_dtype` cases actually exercise the
   device div?"** The point of the question was to pin down which half of
@@ -115,11 +115,11 @@ restating since it asks about what the PR *claims* rather than what it does:
   A sentence in the body whenever you next touch it closes this; no respin on its
   own account.
 
-### Withdrawn — claims of mine that were wrong
+### Withdrawn — asks of mine I am dropping
 
-Both of these are from the round-2 review I took back on 10-06, not from round 1.
-If you read that version in a notification, please disregard these two parts of
-it; everything else in this review supersedes it.
+The first two are from the round-2 review I took back on 10-06; if you read that
+version in a notification, please disregard those parts of it — everything else
+in this review supersedes it. The third is from round 1.
 
 - **The unseeded-`randint` suggestion ("17 of 22 new `randint` params are
   unseeded", item 3 there).** Retracted. The count is right (22 added calls, 5
@@ -141,6 +141,15 @@ it; everything else in this review supersedes it.
   below the problem range": the *numerators* do, but the *quotients* reach
   2×10⁴, well past what device fp16 can represent. The real explanation is
   finding 3.
+- **S2 — "Consider a trunk perf run before merge" (round 1).** Dropping this
+  ask. It was premised on the ~10 `realize()` barriers per floor division being a
+  cost worth measuring, but materialising the intermediates is not a choice this
+  PR makes: Spyre requires one op per SDSC, so the barriers — or something
+  equivalent — are unavoidable in the current backend. I confirmed it by removing
+  them, which does not compile at any shape (`KeyError: 'No FX node for bufN'`).
+  A perf run would therefore not inform any decision available here, so there is
+  nothing to weigh against. I have dropped the matching FYI about the barrier
+  count for the same reason.
 
 ---
 
@@ -483,10 +492,6 @@ Noting these for the record; please don't respin for them.
   pattern, low impact at these params, but it is now applied across more families.
 - **`bool/bool` in the promotion table is unreachable** — aten raises
   `NotImplementedError` for bool `floor_divide`, so that row can never be hit.
-- **`realize()` count.** The floor path takes ~10–14 fusion barriers per division,
-  on an `aten.div` that is now claimed globally. Not a correctness issue and I
-  have no measurement saying it matters; flagging it only because the blast radius
-  is every division in every model.
 - **Deleting `probe2729.py`** was the right call — thank you.
 
 ### Reproduction
