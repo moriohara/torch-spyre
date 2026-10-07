@@ -63,10 +63,11 @@ below.
 - **B2 — "No new test uses a negative divisor, and the default tolerances would
   hide it even if one did."** Largely resolved. Round 1 asked for two things and
   each got a partial answer:
-  - *Add negative-divisor coverage* → five param sets added, but **three of the
-    five are vacuous**: with the round-1 defect reinstated they still pass,
-    because the defect needs exact division with a negative divisor and those
-    three contain none (finding 2).
+  - *Add negative-divisor coverage* → five param sets added, and all five are
+    useful, but **only two of them pin the defect**: with the round-1 bug
+    reinstated the other three still pass, because the defect needs exact
+    division with a negative divisor and those three contain none. Two
+    one-element edits would close that (finding 2).
   - *Tighten the tolerances* → done in `test_div_rounding_mode_cpu` (`atol=0,
     rtol=0`), but **the other two new families were not touched**:
     `test_div_mixed_dtype_cpu` and `test_div_scalar_dtypes_cpu` still compare at
@@ -211,11 +212,11 @@ shapes were exact, but `(67,256)` and `(256,)` hit
 simple in how I forced it. Flagging it only so the upcast gets validated across
 the existing op-test shapes rather than a single one.
 
-### 2. [SUGGESTION] Three of the five negative-divisor param sets cannot catch the round-1 bug
+### 2. [SUGGESTION] Only two of the five negative-divisor sets pin the round-1 bug — two one-element edits would fix that
 
-I checked whether the new tests actually pin B1, by reinstating the round-1
-defect (compare `rem` against `y` instead of `rem_s` against `abs_y`) and
-re-running. Only **two** of the five sets fail: `floor_int64_negdiv_2d` and
+To check whether the new tests actually pin B1 I reinstated the round-1 defect
+(compare `rem` against `y` instead of `rem_s` against `abs_y`) and re-ran. Only
+**two** of the five sets fail: `floor_int64_negdiv_2d` and
 `floor_int64_mixedsign_2d`. `floor_fp32_negdiv_2d`, `floor_fp32_negscalar` and
 `floor_int64_negscalar` still pass with the bug reinstated.
 
@@ -223,12 +224,35 @@ The reason is structural: for `y < 0` a correct remainder lies in `(y, 0]`, so t
 spurious `rem >= y` fires on every element and is then cancelled by `rem < 0` —
 *unless* `rem == 0`. So the defect is only observable on **exact division with a
 negative divisor**, and those three sets contain **zero** exact divisions (the two
-that do catch it have 2556 and 1603). The three hand-written sets use only odd
-numerators and non-integer values.
+that do catch it have 2556 and 1603): the two scalar sets use only odd numerators
+(`[-11, -21, 31, -7] // -2`, `[-10.5, -20.3, 30.7, -5.2] // -2.0`), and the fp32
+2-D set draws from `randn`, where exact division has measure zero.
 
-Cheap fix — one targeted case, e.g. `x = [12, -12, 20, -20, 7, -7, 0, 13]`,
-`y = -4` (5 exact divisions). Correct is `[-3, 3, -5, 5, -2, 1, 0, -4]`; the
-round-1 defect gives `[-2, 4, -4, 6, -2, 1, 1, -4]`.
+**To be clear, these three are not redundant** — they are simply not *regression
+tests for B1*, which is a different thing:
+
+- `floor_fp32_negscalar` and `floor_int64_negscalar` are the only negative-divisor
+  cases with a **Python scalar** divisor, and that takes the other branch of the
+  sign folding you added — the compile-time fold at `lowering.py:2126-2129`
+  (`rem_s = neg(rem) if y < 0 else rem`), not the runtime
+  `lt`/`where` pair. Both catching sets have tensor divisors, so **that branch is
+  exercised only by these two**. Dropping them would lose real coverage.
+- `floor_fp32_negdiv_2d` is the only one where `result_dtype` is float, so it is
+  the negative-divisor case that does not exit through the int cast-back.
+
+So the gap is narrow and the fix is correspondingly small: the scalar branch is
+covered but **not pinned**, and making it pinned costs two elements. Give each
+scalar set one exactly-divisible numerator — e.g. `[-12, -21, 31, -7] // -2` and
+`[-10.0, -20.3, 30.7, -5.2] // -2.0`. For `-12 // -2`: `qf = 6`, `rem = 0`, so
+the defect's `rem >= y` (`0 >= -2`) fires, `rem < 0` does not, and the result is
+**7** instead of 6. That is cheaper than a new param set, keeps the dtype matrix
+as it is, and leaves the scalar fold with a real regression test. (If you would
+rather add a case, `x = [12, -12, 20, -20, 7, -7, 0, 13]`, `y = -4` gives 5 exact
+divisions: correct `[-3, 3, -5, 5, -2, 1, 0, -4]`, defect
+`[-2, 4, -4, 6, -2, 1, 1, -4]`.)
+
+`floor_fp32_negdiv_2d` I would leave alone — random floats will not produce exact
+divisions, and the tensor branch is already pinned by the two int64 sets.
 
 Related, so you can weigh it: the `atol=0, rtol=0` tightening is **not** what
 catches the round-1 defect — I ran the 2×2 over {defect, default tolerances} and
