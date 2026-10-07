@@ -21,15 +21,30 @@ Everything else below is a suggestion or FYI.
 
 ### Resolved since round 1
 
-- **B1 — floor-div with negative divisors.** Fixed. The sign-folded,
-  division-free correction with `qf_minus1` derived from the *updated* `qf` is in.
-  All 11 `test_div_rounding_mode` cases pass on device; the 3 `trunc` cases xfail
-  on a genuine `Unsupported`, not on a wrong answer.
-- **B2 — tests and tolerances.** Largely resolved: `test_div_rounding_mode_cpu`
-  now uses `atol=0, rtol=0`, and five negative-divisor param sets are in. Two
-  gaps left, both narrow — three of those five sets cannot actually catch the
-  round-1 bug (finding 2), and the other two div families still compare at the
-  defaults (finding 3).
+- **B1 — floor-div with negative divisors.** **Resolved for `floor`.** The
+  sign-folded, division-free correction with `qf_minus1` derived from the
+  *updated* `qf` is in, and I confirmed it is not merely untested: reinstating the
+  round-1 defect makes two of the new cases fail, so the fix is real and pinned.
+  All 11 `test_div_rounding_mode` cases pass on device. Two things to keep in
+  mind, neither of them a re-open:
+  - For **`trunc`** the round-1 defect is *unreachable* rather than fixed — all 3
+    trunc cases xfail on a genuine `Unsupported`, which is the right outcome
+    (round 1's objection was that a wrong answer was being xfailed), but it means
+    the trunc branch's sign logic has not been exercised. Whenever trunc is
+    enabled, the negative-divisor-with-exact-division case needs to come back.
+  - The sign logic is right; the **step it lives in** is what finding 1 is about.
+    B1 and the blocker are independent defects in the same correction — fixing
+    the signs did not and could not address the fp16 compute-dtype problem.
+- **B2 — tests and tolerances.** Largely resolved. Round 1 asked for two things
+  and each got a partial answer:
+  - *Add negative-divisor coverage* → five param sets added, but **three of the
+    five are vacuous**: with the round-1 defect reinstated they still pass,
+    because the defect needs exact division with a negative divisor and those
+    three contain none (finding 2).
+  - *Tighten the tolerances* → done in `test_div_rounding_mode_cpu` (`atol=0,
+    rtol=0`), but **the other two new families were not touched**:
+    `test_div_mixed_dtype_cpu` and `test_div_scalar_dtypes_cpu` still compare at
+    the default `atol=rtol=0.1`, and both include `floor_div` (finding 3).
 - **Q2 — why the Inductor built-ins instead of the Spyre `lower_*` wrappers.**
   Answered by the new comment at `lowering.py:2098-2100`, and the answer checks
   out: `register_spyre_lowering` writes into a separate `spyre_lowerings` dict
