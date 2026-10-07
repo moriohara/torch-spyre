@@ -58,8 +58,8 @@ below.
     `rem` are computed at `comp_dtype`, so in fp16 the residual the block needs to
     see can round away. In the worked example it rounds to exactly `0.0`, which is
     indistinguishable from "exact division, quotient already correct" — neither
-    comparison fires and the off-by-one stands. No amount of correct sign handling
-    reaches that: the block cannot act on a residual it cannot see.
+    comparison fires and the off-by-one stands. Despite the correct sign handling,
+    rounding error in the residual still leads to a wrong output.
 - **B2 — "No new test uses a negative divisor, and the default tolerances would
   hide it even if one did."** Largely resolved. Round 1 asked for two things and
   each got a partial answer:
