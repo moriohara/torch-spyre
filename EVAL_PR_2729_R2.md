@@ -89,10 +89,31 @@ below.
   mirror gap.
 
 Still open from round 1: **Q1** ("What is the intended domain for the
-int64-via-fp32 path?" — carried forward as finding 4), **Q3** ("Which of the 14
-`test_div_mixed_dtype` cases actually exercise the device?" — the PR body still
-describes device int64 support rather than the host round-trip), **S2**
-("Consider a trunk perf run before merge."), and the four round-1 FYIs.
+int64-via-fp32 path?" — carried forward as finding 4), **S2** ("Consider a trunk
+perf run before merge."), the four round-1 FYIs, and **Q3**, which is worth
+restating since it asks about what the PR *claims* rather than what it does:
+
+- **Q3 — "Which of the 14 `test_div_mixed_dtype` cases actually exercise the
+  device div?"** The point of the question was to pin down which half of
+  "converting them into fp32 tensors" — this PR's own title — actually happens on
+  device. The measured answer is that the **division** runs on device but **both
+  conversions are host-side**: `int64 → float32` and `float32 → int64` each report
+  `falling back to cpu`, because `DtypeOpTable` has no int64 entries at all (still
+  true at this head — `dtype_ops.py` does not mention int64 anywhere). I am not
+  asking for a code change; that is the only route available today, and #3802 took
+  the same one. Two things follow from it, though:
+  - The description still reads as device int64 support. #3802 documented the
+    identical mechanism explicitly as a host round-trip, and it would be good for
+    the two to say the same thing.
+  - The `filterwarnings` decorators on all three new tests
+    (`:10406-10407` and the two others) suppress `FallbackWarning` and
+    `"Backend Spyre does not support int64"` — exactly the signals that say work
+    moved to the host. They are legitimate noise suppression, but they do mean a
+    green run tells a reader nothing about where the work ran, which is why the
+    description carrying it matters.
+
+  A sentence in the body whenever you next touch it closes this; no respin on its
+  own account.
 
 ### Withdrawn — claims of mine that were wrong
 
