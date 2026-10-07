@@ -27,11 +27,16 @@ Everything else below is a suggestion or FYI.
   round-1 defect makes two of the new cases fail, so the fix is real and pinned.
   All 11 `test_div_rounding_mode` cases pass on device. Two things to keep in
   mind, neither of them a re-open:
-  - For **`trunc`** the round-1 defect is *unreachable* rather than fixed — all 3
-    trunc cases xfail on a genuine `Unsupported`, which is the right outcome
-    (round 1's objection was that a wrong answer was being xfailed), but it means
-    the trunc branch's sign logic has not been exercised. Whenever trunc is
-    enabled, the negative-divisor-with-exact-division case needs to come back.
+  - For **`trunc`** the round-1 defect is *gone* rather than fixed: there is no
+    trunc branch any more. `lowering.py:2143-2145` raises
+    `Unsupported("div with rounding_mode='trunc' is not yet implemented")` with a
+    `TODO(PR#3610)`, and all 3 trunc cases xfail on that rejection. This is the
+    right outcome — round 1's objection was that a *wrong answer* was being
+    xfailed — so no ask here. Just note that trunc inherits two obligations from
+    this review whenever `PR#3610` lands it: a negative-divisor
+    exact-division case (the B1 defect class was never exercisable in trunc), and
+    the quotient-range problem in finding 3, since `trunc_fp16_rand_2d` reaches
+    `|q| = 40608` against an fp16 ceiling of 1024.
   - The sign logic is right; the **step it lives in** is what finding 1 is about.
     B1 and the blocker are independent defects in the same correction — fixing
     the signs did not and could not address the fp16 compute-dtype problem.
