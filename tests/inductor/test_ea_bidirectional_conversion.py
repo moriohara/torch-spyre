@@ -902,4 +902,40 @@ def test_ea_restore_d2h(src_dtype, dst_dtype, expected_ea, shape):
     assert torch.equal(got, ref)
 
 
+# ---------------------------------------------------------------------------
+# H2D EA restore
+# ---------------------------------------------------------------------------
+# A subset of the D2H shapes: stick-aligned, a partial pair (fp16 -> fp32) or a
+# partial stick (fp32 -> fp16), and a 3D shape.
+_EA_H2D_SHAPES = [(4, 64), (4, 128), (4, 100), (8, 16, 128)]
+EA_H2D_TEST_PARAMS = {
+    key: params
+    for key, params in EA_D2H_TEST_PARAMS.items()
+    if params[3] in _EA_H2D_SHAPES
+}
+
+
+@pytest.mark.parametrize(
+    "src_dtype, dst_dtype, expected_ea, shape",
+    EA_H2D_TEST_PARAMS.values(),
+    ids=EA_H2D_TEST_PARAMS.keys(),
+)
+def test_ea_restore_h2d(src_dtype, dst_dtype, expected_ea, shape):
+    values = torch.ceil(cached_randn(shape, dtype=torch.float32) * 5)
+    y = _convert_one_row_per_core(values.to(src_dtype), dst_dtype)
+    assert_ea(y, expected_ea)
+
+    # copy_ writes into y's allocation and keeps its staggered layout, so the
+    # H2D copy has to write the staggered order for D2H and kernels to see it.
+    new = (values + 1).to(dst_dtype)
+    y.copy_(new)  # H2D -> ea_restore
+    assert_ea(y, expected_ea)
+    assert torch.equal(y.cpu(), new)
+
+    # A kernel reads the staggered order too
+    torch._dynamo.reset()
+    back = torch.compile(lambda a: (a + 1).to(src_dtype), dynamic=False)(y)
+    assert torch.equal(back.cpu(), (new + 1).to(src_dtype))
+
+
 # Made with Bob

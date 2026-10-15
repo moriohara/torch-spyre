@@ -34,11 +34,19 @@ source is the device and the destination is the host.
 
 `get_device_stride_infos` first builds the DCSIs as if the layout were in
 STANDARD arrangement. For a staggered layout those DCSIs would copy the
-elements to the wrong host columns. When the copy is D2H and the layout is
-`DL16_TO_FP32` or `FP32_TO_DL16`, `get_device_stride_infos` then calls
-`ea_restore`, which replaces the DCSIs with equivalent ones that undo the
-stagger. `generate_dci` needs no special handling: `get_device_stride_infos`
-already returns restored DCSIs for these layouts.
+elements to the wrong host columns. When the layout is `DL16_TO_FP32` or
+`FP32_TO_DL16`, `get_device_stride_infos` then calls `ea_restore`, which
+replaces the DCSIs with equivalent ones that undo the stagger. `generate_dci`
+needs no special handling: `get_device_stride_infos` already returns restored
+DCSIs for these layouts.
+
+`ea_restore` is written for D2H: it treats the source of each DCSI as the
+device and the destination as the host. An H2D copy into a staggered layout
+(for example `y.copy_(x)`, which keeps `y`'s layout) needs the inverse
+mapping. The rewrite only splits and reorders loops, so
+`get_device_stride_infos` swaps the source and destination strides and offsets
+before calling `ea_restore` and swaps them back afterwards. The H2D copy then
+writes every host element to its staggered device location.
 
 ```text
 generate_dci
@@ -456,6 +464,9 @@ dims only add outer loops that are copied unchanged.
   and returns wrong data without an error. The planned fix is to copy the whole
   allocation to the host in `spyre_copy_from` and slice it on the CPU, so the
   restore only sees copies that start at stick 0.
+* **H2D copies into a slice:** `y[:, a:b].copy_(x)` writes wrong values for
+  STANDARD layouts too (see also #3976), and staggered layouts give the same
+  result. This is independent of the restore.
 * **Padded stick dims and work division:** for stick dims that are not
   stick-aligned, work division does not take the padding into account yet, so
   with some divisions the conversion itself leaves the device values wrong.
@@ -484,3 +495,8 @@ device values are correct for padded shapes. The shape lists are:
 
 fp32 to fp16 shapes that the compiler rejects (see the compile-time
 restriction above) are not part of this test.
+
+`test_ea_restore_h2d` overwrites a staggered result with `copy_` for
+`(4, 64)`, `(4, 128)`, `(4, 100)` and `(8, 16, 128)`, checks that the layout
+is still staggered, and reads it back both with `.cpu()` and through a
+compiled kernel.
